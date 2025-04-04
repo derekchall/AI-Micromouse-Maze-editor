@@ -6,6 +6,8 @@ import random # For generation
 from collections import deque
 import heapq
 import time
+import requests # For downloading
+import os       # For folder creation and path manipulation
 
 # --- Configuration Constants ---
 GRID_SIZE = 16
@@ -16,6 +18,7 @@ WALL_THICKNESS = 2
 ROUTE_WIDTH = 2 # Keep a slight width to see overlapping colors if possible
 CELL_PHYSICAL_SIZE_M = 0.18 # 18 cm per cell
 MAZE_GENERATION_LOOP_PROBABILITY = 0.15 # Chance to remove an extra wall to create loops
+DOWNLOAD_FOLDER = "downloaded_mazes" # Name of the local folder for downloaded mazes
 
 # Colors
 COLOR_BACKGROUND = "white"; COLOR_POST = "black"; COLOR_WALL = "blue"
@@ -26,7 +29,7 @@ COLOR_KEY_SWATCH_BORDER = "#555"
 COLOR_HIGHLIGHT_OPEN = "yellow" # Color for open cells
 
 # Turn Penalties
-DEFAULT_TURN_WEIGHT_STRAIGHTEST = 1.0
+DEFAULT_TURN_WEIGHT_STRAIGHTEST = 4.0 # Default weight changed to 4.0
 TURN_PENALTY_SHORTEST = 0.01
 TURN_PENALTY_DIAGONAL = 1.0 # Turn penalty for diagonal path
 
@@ -41,11 +44,13 @@ DR4 = [-1, 0, 1, 0]; DC4 = [0, 1, 0, -1]
 class MazeEditor:
     def __init__(self, master):
         self.master = master
-        self.master.title("Micromouse Maze Editor (16x16)")
+        # Set initial title here before _update_window_title is called
+        self.master.title("Micromouse Maze Editor (16x16)") # Base title set early
 
         self.cell_visual_size_px = DEFAULT_CELL_VISUAL_SIZE_PX
         self.last_width = 0; self.last_height = 0
         self.resize_timer = None
+        self.current_maze_file = None # Store path of loaded/saved file
 
         self.h_walls = [[False for _ in range(GRID_SIZE)] for _ in range(GRID_SIZE + 1)]
         self.v_walls = [[False for _ in range(GRID_SIZE + 1)] for _ in range(GRID_SIZE)]
@@ -70,11 +75,12 @@ class MazeEditor:
         self.show_route_left_var = tk.BooleanVar(value=True)
         self.show_route_shortest_var = tk.BooleanVar(value=True)
         self.show_route_straightest_var = tk.BooleanVar(value=True)
-        self.show_route_diagonal_var = tk.BooleanVar(value=True)
+        self.show_route_diagonal_var = tk.BooleanVar(value=False)
         self.highlight_open_cells_var = tk.BooleanVar(value=False)
 
         self._setup_gui()
         self._create_color_key()
+        self._update_window_title() # Set initial title properly
 
         self.canvas.bind("<Button-1>", self.on_canvas_click)
         self.master.bind("<Configure>", self.schedule_resize)
@@ -90,23 +96,31 @@ class MazeEditor:
 
     # --- GUI Setup ---
     def _setup_gui(self):
+        """Creates the main GUI elements using grid layout."""
         self.master.rowconfigure(1, weight=1); self.master.columnconfigure(0, weight=1)
         top_control_frame = Frame(self.master)
         top_control_frame.grid(row=0, column=0, sticky="ew", pady=(10, 0), padx=10)
+        # Control Buttons
         Button(top_control_frame, text="Reset Maze", command=self.reset_maze).pack(side=tk.LEFT, padx=5)
         Button(top_control_frame, text="Generate Maze", command=self.generate_maze).pack(side=tk.LEFT, padx=5)
-        Button(top_control_frame, text="Save Maze", command=self.save_maze).pack(side=tk.LEFT, padx=5)
-        Button(top_control_frame, text="Load Maze", command=self.load_maze).pack(side=tk.LEFT, padx=5)
+        # Removed JSON Save/Load
+        Button(top_control_frame, text="Save Text", command=self.save_maze_text).pack(side=tk.LEFT, padx=5)
+        Button(top_control_frame, text="Load Text", command=self.load_maze_text).pack(side=tk.LEFT, padx=5)
+        Button(top_control_frame, text="Download Mazes", command=self.download_mazes).pack(side=tk.LEFT, padx=5)
+        # Right-aligned controls
         right_controls_frame = Frame(top_control_frame)
         right_controls_frame.pack(side=tk.RIGHT, padx=10)
+        # Turn Weight Entry
         weight_frame = Frame(right_controls_frame); weight_frame.pack(side=tk.LEFT, padx=5)
         Label(weight_frame, text="Turn W:").pack(side=tk.LEFT)
         vcmd = (self.master.register(self.validate_float_entry), '%P')
         self.turn_weight_entry = Entry(weight_frame, textvariable=self.turn_weight_var, width=5, validate='key', validatecommand=vcmd)
         self.turn_weight_entry.pack(side=tk.LEFT, padx=(2, 0))
+        # Highlight Open Cells Toggle
         highlight_frame = Frame(right_controls_frame); highlight_frame.pack(side=tk.LEFT, padx=5)
         self.highlight_checkbutton = tk.Checkbutton(highlight_frame, text="Highlight Open", variable=self.highlight_open_cells_var, command=self.find_and_draw_routes)
         self.highlight_checkbutton.pack(side=tk.LEFT)
+        # Canvas, Key Frame, Status Bar setup remains the same
         initial_canvas_width = 2*MARGIN+GRID_SIZE*self.cell_visual_size_px
         initial_canvas_height = 2*MARGIN+GRID_SIZE*self.cell_visual_size_px
         self.canvas = Canvas(self.master, width=initial_canvas_width, height=initial_canvas_height, bg=COLOR_BACKGROUND)
@@ -117,6 +131,7 @@ class MazeEditor:
         self.status_label.grid(row=3, column=0, sticky="ew", ipady=2)
 
     def _create_color_key(self):
+        """Creates the 4 elements within the color key frame, including visibility toggles."""
         self.key_frame.columnconfigure(0, weight=1); self.key_frame.columnconfigure(1, weight=1)
         self.key_frame.columnconfigure(2, weight=1); self.key_frame.columnconfigure(3, weight=1)
         font_size = 8; swatch_size = 12
@@ -145,6 +160,16 @@ class MazeEditor:
             if len(parts) > 1 and not parts[1].isdigit() and parts[1] != "": return False
             return True
         except Exception: return False
+
+    # --- Title Update ---
+    def _update_window_title(self):
+        """Updates the window title based on the current maze file."""
+        base_title = "Micromouse Maze Editor (16x16)"
+        if self.current_maze_file:
+            filename = os.path.basename(self.current_maze_file)
+            self.master.title(f"{base_title} - {filename}")
+        else:
+            self.master.title(base_title)
 
     # --- Resizing Logic ---
     def schedule_resize(self, event=None):
@@ -177,14 +202,21 @@ class MazeEditor:
         for r in range(GRID_SIZE): self.v_walls[r][0] = self.v_walls[r][GRID_SIZE] = True
 
     def reset_maze(self):
+        """Clears inner walls, recalculates routes."""
         for r in range(1, GRID_SIZE):
             for c in range(GRID_SIZE): self.h_walls[r][c] = False
         for r in range(GRID_SIZE):
             for c in range(1, GRID_SIZE): self.v_walls[r][c] = False
+        # Visibility toggles are NOT reset
         self.find_and_draw_routes()
+        # --- Reset filename and title ---
+        self.current_maze_file = None
+        self._update_window_title()
+        # --- ---
         self.update_status("Maze reset to empty.")
 
     def _initialize_all_walls(self):
+        """Sets ALL inner walls to True."""
         for r in range(1, GRID_SIZE):
             for c in range(GRID_SIZE): self.h_walls[r][c] = True
         for r in range(GRID_SIZE):
@@ -199,9 +231,22 @@ class MazeEditor:
     def cell_to_pixel(self, r, c):
         x = MARGIN + c * self.cell_visual_size_px; y = MARGIN + r * self.cell_visual_size_px
         return x, y
-    def cell_center_to_pixel(self, r, c, offset_x=0, offset_y=0): # Offset args kept for compatibility, but not used now
+    def cell_center_to_pixel(self, r, c, offset_x=0, offset_y=0): # Offset args kept but unused now
         x = MARGIN + (c + 0.5) * self.cell_visual_size_px + offset_x
         y = MARGIN + (r + 0.5) * self.cell_visual_size_px + offset_y
+        return x, y
+    def wall_midpoint_to_pixel(self, r_cell, c_cell, direction4):
+        cell_size = self.cell_visual_size_px
+        center_x, center_y = self.cell_center_to_pixel(r_cell, c_cell)
+        if direction4 == N4:   y_mid = center_y - cell_size * 0.5; x_mid = center_x
+        elif direction4 == E4: x_mid = center_x + cell_size * 0.5; y_mid = center_y
+        elif direction4 == S4: y_mid = center_y + cell_size * 0.5; x_mid = center_x
+        elif direction4 == W4: x_mid = center_x - cell_size * 0.5; y_mid = center_y
+        else: return center_x, center_y
+        return x_mid, y_mid
+    def post_to_pixel(self, r_post, c_post):
+        x = MARGIN + c_post * self.cell_visual_size_px
+        y = MARGIN + r_post * self.cell_visual_size_px
         return x, y
     def pixel_to_cell(self, x, y):
         if self.cell_visual_size_px <= 0: return (0,0)
@@ -286,13 +331,12 @@ class MazeEditor:
                      if not wall_n and not wall_e and not wall_s and not wall_w:
                          fill_color = COLOR_HIGHLIGHT_OPEN
                 self.canvas.create_rectangle(x0, y0, x1, y1, fill=fill_color, outline=COLOR_GRID_LINE, tags="cell")
-
-        # Draw Start Arrow (correctly uses cell_center_to_pixel without extra args)
+        # Draw Start Arrow
         arrow_center_x, arrow_base_y = self.cell_center_to_pixel(start_r,start_c)
         arrow_tip_y = arrow_base_y - cell_size * 0.4 # Calculate tip relative to base
         arrow_width = max(1, int(cell_size * 0.1))
         self.canvas.create_line(arrow_center_x,arrow_base_y,arrow_center_x,arrow_tip_y,arrow=tk.LAST,fill="black",width=arrow_width,tags="start_arrow")
-
+        # Draw Walls & Posts
         for r_wall in range(GRID_SIZE + 1):
             for c_wall in range(GRID_SIZE):
                 if self.h_walls[r_wall][c_wall]:
@@ -312,7 +356,8 @@ class MazeEditor:
     # Removed _get_segment_offset
 
     def draw_current_routes(self):
-        """Draws all stored routes center-to-center, respects visibility toggles."""
+        """Draws routes. Orthogonal connect wall midpoints. Diagonal connect cell centers.
+           Respects visibility toggles."""
         self.canvas.delete("route_left", "route_shortest", "route_straightest", "route_diagonal")
 
         visibility_map = {
@@ -324,10 +369,12 @@ class MazeEditor:
         line_options = {'width': ROUTE_WIDTH, 'capstyle': tk.ROUND}
 
         paths_colors_tags = [
+            # Draw non-diagonal first
             (self.route_path_shortest, COLOR_ROUTE_SHORTEST, "route_shortest"),
-            (self.route_path_diagonal, COLOR_ROUTE_DIAGONAL, "route_diagonal"),
             (self.route_path_straightest, COLOR_ROUTE_STRAIGHTEST, "route_straightest"),
             (self.route_path_left, COLOR_ROUTE_LEFT, "route_left"),
+            # Draw diagonal last
+            (self.route_path_diagonal, COLOR_ROUTE_DIAGONAL, "route_diagonal"),
         ]
 
         for path, color, tag in paths_colors_tags:
@@ -335,13 +382,54 @@ class MazeEditor:
             if not visibility_var or not visibility_var.get(): continue
             if len(path) < 2: continue
 
-            # --- Draw ALL paths center-to-center ---
+            # --- Draw path segments ---
             for i in range(len(path) - 1):
-                r1, c1 = path[i]; r2, c2 = path[i+1]
-                x1c, y1c = self.cell_center_to_pixel(r1, c1) # No offset
-                x2c, y2c = self.cell_center_to_pixel(r2, c2) # No offset
-                self.canvas.create_line(x1c, y1c, x2c, y2c, fill=color, tags=tag, **line_options)
-            # --- No connector logic needed ---
+                r1, c1 = path[i]
+                r2, c2 = path[i+1]
+                x1, y1, x2, y2 = 0, 0, 0, 0 # Initialize coordinates
+
+                dr = r2 - r1
+                dc = c2 - c1
+                is_ortho = abs(dr) + abs(dc) == 1
+                is_diag = abs(dr) == 1 and abs(dc) == 1
+
+                if is_ortho:
+                    # --- Orthogonal move: Connect wall midpoints ---
+                    move_dir4 = -1
+                    if dr == -1: move_dir4 = N4
+                    elif dr == 1: move_dir4 = S4
+                    elif dc == -1: move_dir4 = W4
+                    elif dc == 1: move_dir4 = E4
+
+                    if move_dir4 != -1:
+                        if i > 0: # Need previous point for entry wall
+                            r0, c0 = path[i-1]
+                            dr_prev = r1 - r0; dc_prev = c1 - c0
+                            prev_move_dir4 = -1
+                            if dr_prev == -1: prev_move_dir4 = N4
+                            elif dr_prev == 1: prev_move_dir4 = S4
+                            elif dc_prev == -1: prev_move_dir4 = W4
+                            elif dc_prev == 1: prev_move_dir4 = E4
+                            elif abs(dr_prev)==1 and abs(dc_prev)==1: prev_move_dir4 = -2 # Diag entry flag
+
+                            if prev_move_dir4 == -2: x1, y1 = self.cell_center_to_pixel(r1, c1) # Start from center if entered diagonally
+                            elif prev_move_dir4 != -1: entry_dir4 = (prev_move_dir4 + 2) % 4; x1, y1 = self.wall_midpoint_to_pixel(r1, c1, entry_dir4)
+                            else: x1, y1 = self.cell_center_to_pixel(r1, c1) # Should not happen after first move
+                        else: # First segment, start from center
+                           x1, y1 = self.cell_center_to_pixel(r1, c1)
+
+                        # Exit point is midpoint of current exit wall relative to r1,c1
+                        x2, y2 = self.wall_midpoint_to_pixel(r1, c1, move_dir4)
+
+                elif is_diag:
+                    # --- Diagonal move: Connect cell centers ---
+                    x1, y1 = self.cell_center_to_pixel(r1, c1)
+                    x2, y2 = self.cell_center_to_pixel(r2, c2)
+
+                # Draw the calculated segment
+                if x1 != 0 or y1 != 0 or x2 != 0 or y2 != 0: # Ensure points were calculated
+                    self.canvas.create_line(x1, y1, x2, y2, fill=color, tags=tag, **line_options)
+
 
     # --- Path Distance Calculation ---
     def _calculate_path_distance(self, path):
@@ -639,27 +727,128 @@ class MazeEditor:
             else: pass
 
     # --- Save/Load ---
-    def save_maze(self):
-        filename = filedialog.asksaveasfilename(defaultextension=".json", filetypes=[("JSON files","*.json"),("All files","*.*")], title="Save Maze As")
+    # Removed save_maze (JSON) and load_maze (JSON) methods
+
+    # --- Save/Load Text Format ---
+    def save_maze_text(self):
+        filename = filedialog.asksaveasfilename(
+            defaultextension=".txt", filetypes=[("Text files", "*.txt"), ("All files", "*.*")],
+            title="Save Maze As Text File" )
         if not filename: return
-        maze_data = {"grid_size": GRID_SIZE, "h_walls": self.h_walls, "v_walls": self.v_walls}
+        output_lines = []
+        num_rows = 2 * GRID_SIZE + 1
+        for out_r in range(num_rows):
+            row_str = ""
+            if out_r % 2 == 0: # Even rows: Horizontal walls
+                r_wall = out_r // 2; row_str += "o"
+                for c in range(GRID_SIZE):
+                    has_h_wall = False
+                    if 0 <= r_wall < len(self.h_walls) and 0 <= c < len(self.h_walls[0]): has_h_wall = self.h_walls[r_wall][c]
+                    row_str += "---" if has_h_wall else "   "; row_str += "o"
+            else: # Odd rows: Vertical walls and cell contents
+                r_cell = (out_r - 1) // 2
+                for c in range(GRID_SIZE + 1):
+                    has_v_wall = False
+                    if 0 <= r_cell < len(self.v_walls) and 0 <= c < len(self.v_walls[0]): has_v_wall = self.v_walls[r_cell][c]
+                    row_str += "|" if has_v_wall else " "
+                    if c < GRID_SIZE:
+                        cell_content = "   "
+                        if (r_cell, c) == self.start_cell: cell_content = " S "
+                        elif (r_cell, c) in self.goal_cells: cell_content = " G "
+                        row_str += cell_content
+            output_lines.append(row_str)
         try:
-            with open(filename, 'w') as f: json.dump(maze_data, f, indent=2)
-            self.update_status(f"Maze saved to {filename}")
-        except Exception as e: messagebox.showerror("Save Error",f"Failed to save maze:\n{e}"); self.update_status("Save failed.")
-    def load_maze(self):
-        filename = filedialog.askopenfilename(filetypes=[("JSON files","*.json"),("All files","*.*")], title="Load Maze File")
+            with open(filename, 'w') as f: f.write("\n".join(output_lines))
+            # --- Update filename and title ---
+            self.current_maze_file = filename
+            self._update_window_title()
+            # --- ---
+            self.update_status(f"Maze saved to text file {filename}")
+        except Exception as e:
+            messagebox.showerror("Save Text Error", f"Failed to save maze text:\n{e}"); self.update_status("Save text failed.")
+
+    def load_maze_text(self):
+        filename = filedialog.askopenfilename(
+            filetypes=[("Text files", "*.txt"), ("All files", "*.*")], title="Load Maze Text File" )
         if not filename: return
         try:
-            with open(filename, 'r') as f: maze_data = json.load(f)
-            if not isinstance(maze_data, dict) or maze_data.get("grid_size") != GRID_SIZE: raise ValueError("Invalid format or size")
-            self.h_walls = [[bool(w) for w in r] for r in maze_data['h_walls']]
-            self.v_walls = [[bool(w) for w in r] for r in maze_data['v_walls']]
+            with open(filename, 'r') as f: lines = [line.rstrip() for line in f]
+            expected_rows = 2 * GRID_SIZE + 1; expected_cols = 4 * GRID_SIZE + 1
+            if len(lines) != expected_rows: raise ValueError(f"Invalid rows. Expected {expected_rows}, found {len(lines)}.")
+            if len(lines[0]) < expected_cols: raise ValueError(f"Invalid cols. Expected {expected_cols}, found {len(lines[0])}.")
+            new_h_walls = [[False for _ in range(GRID_SIZE)] for _ in range(GRID_SIZE + 1)]
+            new_v_walls = [[False for _ in range(GRID_SIZE + 1)] for _ in range(GRID_SIZE)]
+            for r_idx, line in enumerate(lines):
+                if r_idx % 2 == 0: # Horizontal walls
+                    r_wall = r_idx // 2
+                    if 0 < r_wall <= GRID_SIZE:
+                        for c_wall in range(GRID_SIZE):
+                            char_idx = c_wall * 4 + 1
+                            if char_idx < len(line): new_h_walls[r_wall][c_wall] = (line[char_idx] == '-')
+                else: # Vertical walls
+                    r_cell = (r_idx - 1) // 2
+                    if 0 <= r_cell < GRID_SIZE:
+                        for c_wall in range(GRID_SIZE + 1):
+                             char_idx = c_wall * 4
+                             if char_idx < len(line): new_v_walls[r_cell][c_wall] = (line[char_idx] == '|')
+            self.h_walls = new_h_walls; self.v_walls = new_v_walls
             self.initialize_outer_walls()
-            # Visibility toggles NOT reset
-            self.handle_resize(self.master.winfo_width(), self.master.winfo_height())
-            self.update_status(f"Maze loaded from {filename}.")
-        except Exception as e: messagebox.showerror("Load Error",f"Failed to load maze:\n{e}"); self.update_status(f"Load failed: {e}")
+            # --- Update filename and title ---
+            self.current_maze_file = filename
+            self._update_window_title()
+            # --- ---
+            self.find_and_draw_routes()
+            self.update_status(f"Maze loaded from text file {filename}")
+        except FileNotFoundError:
+             messagebox.showerror("Load Text Error", f"File not found:\n{filename}"); self.update_status("Load text failed: File not found.")
+             self.current_maze_file = None; self._update_window_title()
+        except ValueError as e:
+             messagebox.showerror("Load Text Error", f"Invalid maze file format:\n{e}"); self.update_status(f"Load text failed: {e}")
+             self.current_maze_file = None; self._update_window_title()
+        except Exception as e:
+            messagebox.showerror("Load Text Error", f"Failed to load maze text:\n{e}"); self.update_status("Load text failed.")
+            self.current_maze_file = None; self._update_window_title()
+
+
+    def download_mazes(self):
+        """Downloads maze files from the specified GitHub repository after confirmation."""
+        api_url = "https://api.github.com/repos/micromouseonline/mazefiles/contents/classic"
+        local_folder = DOWNLOAD_FOLDER
+        confirm = messagebox.askyesno("Confirm Download", f"Download maze files into '{local_folder}'?")
+        if not confirm: self.update_status("Download cancelled."); return
+
+        self.update_status(f"Attempting to download mazes to '{local_folder}'...")
+        self.master.update()
+        try:
+            os.makedirs(local_folder, exist_ok=True)
+            response = requests.get(api_url, timeout=15)
+            response.raise_for_status()
+            files_data = response.json()
+            if not isinstance(files_data, list): raise ValueError("Invalid response format from GitHub API")
+            downloaded_count = 0; skipped_count = 0
+            for item in files_data:
+                if item.get("type") == "file" and item.get("name", "").lower().endswith(".txt"):
+                    file_name = item["name"]; download_url = item.get("download_url")
+                    local_path = os.path.join(local_folder, file_name)
+                    if not download_url: print(f"Warning: No download URL for {file_name}"); skipped_count += 1; continue
+                    try:
+                        self.update_status(f"Downloading {file_name}..."); self.master.update()
+                        file_response = requests.get(download_url, timeout=10)
+                        file_response.raise_for_status()
+                        with open(local_path, 'w', encoding='utf-8') as f: f.write(file_response.text)
+                        downloaded_count += 1
+                    except requests.exceptions.RequestException as req_err: print(f"Warning: Failed to download {file_name}: {req_err}"); skipped_count += 1
+                    except IOError as io_err: print(f"Warning: Failed to save {file_name}: {io_err}"); skipped_count += 1
+                    except Exception as e: print(f"Warning: Error processing {file_name}: {e}"); skipped_count += 1
+            final_message = f"Download complete: {downloaded_count} mazes saved"
+            if skipped_count > 0: final_message += f" ({skipped_count} skipped/failed)."
+            self.update_status(final_message)
+            messagebox.showinfo("Download Complete", final_message + f"\nMazes saved in '{local_folder}' folder.")
+        except requests.exceptions.RequestException as e: messagebox.showerror("Download Error", f"Failed to fetch maze list from GitHub:\n{e}"); self.update_status("Maze download failed (network error).")
+        except ValueError as e: messagebox.showerror("Download Error", f"Failed to parse GitHub response:\n{e}"); self.update_status("Maze download failed (API format error).")
+        except OSError as e: messagebox.showerror("Download Error", f"Failed create directory '{local_folder}':\n{e}"); self.update_status("Maze download failed (file system error).")
+        except Exception as e: messagebox.showerror("Download Error", f"An unexpected error occurred:\n{e}"); self.update_status("Maze download failed (unexpected error).")
+
 
     def update_status(self, message):
         self.status_label.config(text=message)

@@ -12,3 +12,5 @@ You can also highlight cells with no walls, as these can be difficult to navigat
 A random maze generator is also included to give you a head start
 
 The diagonal route solving leaves something to be desired, but I left it in anyway
+to install dependancys used run
+pip install -r requirements.txt 
