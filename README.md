@@ -1,4 +1,4 @@
-# AI-Micromouse-Maze-editor
+### AI-Micromouse-Maze-editor
 A MicroMouse maze editor created by Gemini 2.5 Pro Experimental
 
 This was created without any coding adjustments
@@ -12,5 +12,8 @@ You can also highlight cells with no walls, as these can be difficult to navigat
 A random maze generator is also included to give you a head start
 
 The diagonal route solving leaves something to be desired, but I left it in anyway
+
+#to install 
+install python 3
 to install dependancys used run
 pip install -r requirements.txt 
