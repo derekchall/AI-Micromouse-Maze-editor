@@ -1,5 +1,6 @@
 import tkinter as tk
-from tkinter import Canvas, Frame, Button, Label, Entry, messagebox, filedialog, StringVar, DoubleVar
+# Make sure Listbox and Scrollbar are imported if not already implicitly covered
+from tkinter import Canvas, Frame, Button, Label, Entry, messagebox, filedialog, StringVar, DoubleVar, Listbox, Scrollbar, Toplevel, END, SINGLE
 import math
 import json
 import random # For generation
@@ -18,7 +19,7 @@ WALL_THICKNESS = 2
 ROUTE_WIDTH = 2 # Keep a slight width to see overlapping colors if possible
 CELL_PHYSICAL_SIZE_M = 0.18 # 18 cm per cell
 MAZE_GENERATION_LOOP_PROBABILITY = 0.15 # Chance to remove an extra wall to create loops
-DOWNLOAD_FOLDER = "downloaded_mazes" # Name of the local folder for downloaded mazes
+DOWNLOAD_FOLDER = "downloaded_mazes" # Default Name for local folder if not choosing existing
 
 # Colors
 COLOR_BACKGROUND = "white"; COLOR_POST = "black"; COLOR_WALL = "blue"
@@ -44,13 +45,13 @@ DR4 = [-1, 0, 1, 0]; DC4 = [0, 1, 0, -1]
 class MazeEditor:
     def __init__(self, master):
         self.master = master
-        # Set initial title here before _update_window_title is called
         self.master.title("Micromouse Maze Editor (16x16)") # Base title set early
 
         self.cell_visual_size_px = DEFAULT_CELL_VISUAL_SIZE_PX
         self.last_width = 0; self.last_height = 0
         self.resize_timer = None
-        self.current_maze_file = None # Store path of loaded/saved file
+        self.current_maze_file = None # Store path/name of loaded/saved file
+        self.maze_modified = False # Track unsaved changes
 
         self.h_walls = [[False for _ in range(GRID_SIZE)] for _ in range(GRID_SIZE + 1)]
         self.v_walls = [[False for _ in range(GRID_SIZE + 1)] for _ in range(GRID_SIZE)]
@@ -75,7 +76,7 @@ class MazeEditor:
         self.show_route_left_var = tk.BooleanVar(value=True)
         self.show_route_shortest_var = tk.BooleanVar(value=True)
         self.show_route_straightest_var = tk.BooleanVar(value=True)
-        self.show_route_diagonal_var = tk.BooleanVar(value=False)
+        self.show_route_diagonal_var = tk.BooleanVar(value=False) # Default False
         self.highlight_open_cells_var = tk.BooleanVar(value=False)
 
         self._setup_gui()
@@ -84,10 +85,13 @@ class MazeEditor:
 
         self.canvas.bind("<Button-1>", self.on_canvas_click)
         self.master.bind("<Configure>", self.schedule_resize)
+        # --- Add WM_DELETE_WINDOW protocol handler ---
+        self.master.protocol("WM_DELETE_WINDOW", self.on_close_window)
+        # --- ---
 
         self.master.update_idletasks()
         self.handle_resize(self.master.winfo_width(), self.master.winfo_height())
-        self.reset_maze()
+        self.reset_maze() # Call reset after everything is set up
 
     # --- Dynamic Size Calculation Properties ---
     @property
@@ -103,10 +107,9 @@ class MazeEditor:
         # Control Buttons
         Button(top_control_frame, text="Reset Maze", command=self.reset_maze).pack(side=tk.LEFT, padx=5)
         Button(top_control_frame, text="Generate Maze", command=self.generate_maze).pack(side=tk.LEFT, padx=5)
-        # Removed JSON Save/Load
-        Button(top_control_frame, text="Save Text", command=self.save_maze_text).pack(side=tk.LEFT, padx=5)
-        Button(top_control_frame, text="Load Text", command=self.load_maze_text).pack(side=tk.LEFT, padx=5)
-        Button(top_control_frame, text="Download Mazes", command=self.download_mazes).pack(side=tk.LEFT, padx=5)
+        Button(top_control_frame, text="Save Maze", command=self.save_maze_text).pack(side=tk.LEFT, padx=5) # Renamed
+        Button(top_control_frame, text="Load Maze", command=self.load_maze_text).pack(side=tk.LEFT, padx=5) # Renamed
+        Button(top_control_frame, text="Load from GitHub", command=self.fetch_github_maze_list).pack(side=tk.LEFT, padx=5) # Renamed Command
         # Right-aligned controls
         right_controls_frame = Frame(top_control_frame)
         right_controls_frame.pack(side=tk.RIGHT, padx=10)
@@ -120,13 +123,15 @@ class MazeEditor:
         highlight_frame = Frame(right_controls_frame); highlight_frame.pack(side=tk.LEFT, padx=5)
         self.highlight_checkbutton = tk.Checkbutton(highlight_frame, text="Highlight Open", variable=self.highlight_open_cells_var, command=self.find_and_draw_routes)
         self.highlight_checkbutton.pack(side=tk.LEFT)
-        # Canvas, Key Frame, Status Bar setup remains the same
+        # Canvas
         initial_canvas_width = 2*MARGIN+GRID_SIZE*self.cell_visual_size_px
         initial_canvas_height = 2*MARGIN+GRID_SIZE*self.cell_visual_size_px
         self.canvas = Canvas(self.master, width=initial_canvas_width, height=initial_canvas_height, bg=COLOR_BACKGROUND)
         self.canvas.grid(row=1, column=0, sticky="nsew", pady=(5, 5), padx=10)
+        # Color Key
         self.key_frame = Frame(self.master, bd=1, relief=tk.GROOVE)
         self.key_frame.grid(row=2, column=0, sticky="ew", pady=(0, 5), padx=10)
+        # Status Bar
         self.status_label = Label(self.master, text="Initializing...", bd=1, relief=tk.SUNKEN, anchor=tk.W)
         self.status_label.grid(row=3, column=0, sticky="ew", ipady=2)
 
@@ -163,13 +168,18 @@ class MazeEditor:
 
     # --- Title Update ---
     def _update_window_title(self):
-        """Updates the window title based on the current maze file."""
+        """Updates the window title based on the current maze file and modified state."""
         base_title = "Micromouse Maze Editor (16x16)"
+        title = base_title
         if self.current_maze_file:
-            filename = os.path.basename(self.current_maze_file)
-            self.master.title(f"{base_title} - {filename}")
-        else:
-            self.master.title(base_title)
+            if self.current_maze_file.startswith("GitHub: "):
+                filename = self.current_maze_file.split("GitHub: ", 1)[1]
+            else:
+                filename = os.path.basename(self.current_maze_file)
+            title = f"{base_title} - {filename}"
+        if self.maze_modified: # <<< Add asterisk if modified
+            title += " *"
+        self.master.title(title)
 
     # --- Resizing Logic ---
     def schedule_resize(self, event=None):
@@ -201,18 +211,37 @@ class MazeEditor:
         for c in range(GRID_SIZE): self.h_walls[0][c] = self.h_walls[GRID_SIZE][c] = True
         for r in range(GRID_SIZE): self.v_walls[r][0] = self.v_walls[r][GRID_SIZE] = True
 
+    def _check_save_before_action(self, action_description="continue"):
+        """Checks if maze is modified and asks user to save, discard, or cancel."""
+        if not self.maze_modified:
+            return True # No changes, proceed
+
+        response = messagebox.askyesnocancel(
+            "Unsaved Changes",
+            f"Maze has been modified. Save changes before {action_description}?",
+            parent=self.master
+        )
+
+        if response is True: # Yes (Save)
+            if self.save_maze_text(): return True # Save successful
+            else: return False # Save cancelled/failed
+        elif response is False: # No (Discard)
+            return True
+        else: # Cancel
+            return False
+
     def reset_maze(self):
-        """Clears inner walls, recalculates routes."""
+        """Clears inner walls, recalculates routes, after checking for save."""
+        if not self._check_save_before_action("resetting"): return # Abort if needed
+
         for r in range(1, GRID_SIZE):
             for c in range(GRID_SIZE): self.h_walls[r][c] = False
         for r in range(GRID_SIZE):
             for c in range(1, GRID_SIZE): self.v_walls[r][c] = False
-        # Visibility toggles are NOT reset
-        self.find_and_draw_routes()
-        # --- Reset filename and title ---
         self.current_maze_file = None
+        self.maze_modified = False # Reset flag AFTER successful action
         self._update_window_title()
-        # --- ---
+        self.find_and_draw_routes()
         self.update_status("Maze reset to empty.")
 
     def _initialize_all_walls(self):
@@ -302,14 +331,21 @@ class MazeEditor:
             if wall_type == 'h': self.h_walls[r][c] = not self.h_walls[r][c]; toggled = True
             elif wall_type == 'v': self.v_walls[r][c] = not self.v_walls[r][c]; toggled = True
             if toggled:
+                self.maze_modified = True # Set flag
                 self.find_and_draw_routes()
                 self.update_status(f"Wall {'H' if wall_type=='h' else 'V'}({r},{c}) toggled.")
+                self._update_window_title() # Update title to potentially add '*'
     def on_turn_weight_change(self, *args):
          try:
              current_value = self.turn_weight_var.get()
              self.find_and_draw_routes()
              self.update_status("Turn weight changed.")
          except tk.TclError: pass
+
+    def on_close_window(self):
+        """Handler for window close event."""
+        if self._check_save_before_action("closing"):
+            self.master.destroy() # Close window if check passes
 
     # --- Drawing ---
     def draw_maze(self):
@@ -331,12 +367,10 @@ class MazeEditor:
                      if not wall_n and not wall_e and not wall_s and not wall_w:
                          fill_color = COLOR_HIGHLIGHT_OPEN
                 self.canvas.create_rectangle(x0, y0, x1, y1, fill=fill_color, outline=COLOR_GRID_LINE, tags="cell")
-        # Draw Start Arrow
         arrow_center_x, arrow_base_y = self.cell_center_to_pixel(start_r,start_c)
-        arrow_tip_y = arrow_base_y - cell_size * 0.4 # Calculate tip relative to base
+        arrow_tip_y = arrow_base_y - cell_size * 0.4
         arrow_width = max(1, int(cell_size * 0.1))
         self.canvas.create_line(arrow_center_x,arrow_base_y,arrow_center_x,arrow_tip_y,arrow=tk.LAST,fill="black",width=arrow_width,tags="start_arrow")
-        # Draw Walls & Posts
         for r_wall in range(GRID_SIZE + 1):
             for c_wall in range(GRID_SIZE):
                 if self.h_walls[r_wall][c_wall]:
@@ -356,7 +390,8 @@ class MazeEditor:
     # Removed _get_segment_offset
 
     def draw_current_routes(self):
-        """Draws routes. Orthogonal connect wall midpoints. Diagonal connect cell centers.
+        """Draws routes. Left Follower uses 90-deg center turns.
+           Others use wall midpoints for ortho segments and cell centers for diagonal segments.
            Respects visibility toggles."""
         self.canvas.delete("route_left", "route_shortest", "route_straightest", "route_diagonal")
 
@@ -366,15 +401,21 @@ class MazeEditor:
             "route_diagonal": self.show_route_diagonal_var,
             "route_straightest": self.show_route_straightest_var
         }
-        line_options = {'width': ROUTE_WIDTH, 'capstyle': tk.ROUND}
+        # Use Butt cap style for sharp corners on the wall follower
+        line_options_sharp = {'width': ROUTE_WIDTH, 'capstyle': tk.BUTT}
+         # Use thicker, round caps for shortest path
+        line_options_shortest = {'width': ROUTE_WIDTH + 2, 'capstyle': tk.ROUND}
+        # Use standard round caps for others
+        line_options_round = {'width': ROUTE_WIDTH, 'capstyle': tk.ROUND}
+
 
         paths_colors_tags = [
-            # Draw non-diagonal first
+            # Draw non-wall-follower paths first
             (self.route_path_shortest, COLOR_ROUTE_SHORTEST, "route_shortest"),
             (self.route_path_straightest, COLOR_ROUTE_STRAIGHTEST, "route_straightest"),
-            (self.route_path_left, COLOR_ROUTE_LEFT, "route_left"),
-            # Draw diagonal last
             (self.route_path_diagonal, COLOR_ROUTE_DIAGONAL, "route_diagonal"),
+            # Draw wall follower last
+            (self.route_path_left, COLOR_ROUTE_LEFT, "route_left"),
         ]
 
         for path, color, tag in paths_colors_tags:
@@ -382,53 +423,75 @@ class MazeEditor:
             if not visibility_var or not visibility_var.get(): continue
             if len(path) < 2: continue
 
-            # --- Draw path segments ---
-            for i in range(len(path) - 1):
-                r1, c1 = path[i]
-                r2, c2 = path[i+1]
-                x1, y1, x2, y2 = 0, 0, 0, 0 # Initialize coordinates
+            # --- Special handling for Left Follower Path Visualization (Center-to-Center Polyline) ---
+            if tag == "route_left":
+                 points = []
+                 for r_cell, c_cell in path: # Convert path cells to list of center pixels
+                      x, y = self.cell_center_to_pixel(r_cell, c_cell)
+                      points.append(x); points.append(y)
+                 if len(points) >= 4: # Draw polyline connecting centers
+                     self.canvas.create_line(points, fill=color, tags=tag, **line_options_sharp)
 
-                dr = r2 - r1
-                dc = c2 - c1
-                is_ortho = abs(dr) + abs(dc) == 1
-                is_diag = abs(dr) == 1 and abs(dc) == 1
+            # --- Handling for Other Paths (Wall Midpoints / Center for Diag) ---
+            else: # route_shortest, route_straightest, route_diagonal
+                # Select line options for this path
+                current_line_options = line_options_shortest if tag == "route_shortest" else line_options_round
 
-                if is_ortho:
-                    # --- Orthogonal move: Connect wall midpoints ---
-                    move_dir4 = -1
-                    if dr == -1: move_dir4 = N4
-                    elif dr == 1: move_dir4 = S4
-                    elif dc == -1: move_dir4 = W4
-                    elif dc == 1: move_dir4 = E4
+                last_x, last_y = 0, 0 # Keep track of the end point of the previous segment drawn
 
-                    if move_dir4 != -1:
-                        if i > 0: # Need previous point for entry wall
-                            r0, c0 = path[i-1]
-                            dr_prev = r1 - r0; dc_prev = c1 - c0
-                            prev_move_dir4 = -1
-                            if dr_prev == -1: prev_move_dir4 = N4
-                            elif dr_prev == 1: prev_move_dir4 = S4
-                            elif dc_prev == -1: prev_move_dir4 = W4
-                            elif dc_prev == 1: prev_move_dir4 = E4
-                            elif abs(dr_prev)==1 and abs(dc_prev)==1: prev_move_dir4 = -2 # Diag entry flag
+                for i in range(len(path)): # Iterate through all points including last
+                    r1, c1 = path[i]
+                    x1, y1 = 0, 0 # Initialize start point for this segment
 
-                            if prev_move_dir4 == -2: x1, y1 = self.cell_center_to_pixel(r1, c1) # Start from center if entered diagonally
-                            elif prev_move_dir4 != -1: entry_dir4 = (prev_move_dir4 + 2) % 4; x1, y1 = self.wall_midpoint_to_pixel(r1, c1, entry_dir4)
-                            else: x1, y1 = self.cell_center_to_pixel(r1, c1) # Should not happen after first move
-                        else: # First segment, start from center
-                           x1, y1 = self.cell_center_to_pixel(r1, c1)
+                    if i == 0: # First point - always use cell center
+                         x1, y1 = self.cell_center_to_pixel(r1, c1)
+                         last_x, last_y = x1, y1 # Initialize last point
+                         continue # Move to next point to draw the first segment
 
-                        # Exit point is midpoint of current exit wall relative to r1,c1
-                        x2, y2 = self.wall_midpoint_to_pixel(r1, c1, move_dir4)
+                    # We are at point i > 0, drawing segment from path[i-1] to path[i]
+                    r0, c0 = path[i-1] # Previous cell
 
-                elif is_diag:
-                    # --- Diagonal move: Connect cell centers ---
-                    x1, y1 = self.cell_center_to_pixel(r1, c1)
-                    x2, y2 = self.cell_center_to_pixel(r2, c2)
+                    # Determine start point (endpoint of previous segment)
+                    x1, y1 = last_x, last_y
 
-                # Draw the calculated segment
-                if x1 != 0 or y1 != 0 or x2 != 0 or y2 != 0: # Ensure points were calculated
-                    self.canvas.create_line(x1, y1, x2, y2, fill=color, tags=tag, **line_options)
+                    # Determine end point (x2, y2) based on move r0,c0 -> r1,c1
+                    dr = r1 - r0
+                    dc = c1 - c0
+                    is_ortho = abs(dr) + abs(dc) == 1
+                    is_diag = abs(dr) == 1 and abs(dc) == 1
+
+                    if is_ortho:
+                        # Orthogonal move: End at the midpoint of the entry wall of r1,c1
+                        move_dir4 = -1
+                        if dr == -1: move_dir4 = N4
+                        elif dr == 1: move_dir4 = S4
+                        elif dc == -1: move_dir4 = W4
+                        elif dc == 1: move_dir4 = E4
+
+                        if move_dir4 != -1:
+                            entry_dir4 = (move_dir4 + 2) % 4 # Wall relative to r1,c1
+                            x2, y2 = self.wall_midpoint_to_pixel(r1, c1, entry_dir4)
+                        else: # Should not happen
+                            x2, y2 = self.cell_center_to_pixel(r1, c1)
+
+                    elif is_diag:
+                        # Diagonal move: End at the center of r1,c1
+                        x2, y2 = self.cell_center_to_pixel(r1, c1)
+                    else: # Should not happen
+                        x2, y2 = self.cell_center_to_pixel(r1, c1)
+
+                    # Draw the segment
+                    if x1 != 0 or y1 != 0 or x2 != 0 or y2 != 0:
+                         self.canvas.create_line(x1, y1, x2, y2, fill=color, tags=tag, **current_line_options)
+                         last_x, last_y = x2, y2 # Update last point for the next segment
+
+                # --- Final connection to last cell center ---
+                if len(path) >= 1: # Check if there was at least one point
+                    final_r, final_c = path[-1]
+                    final_x, final_y = self.cell_center_to_pixel(final_r, final_c)
+                    # Only draw if the last point isn't already the center
+                    if abs(last_x - final_x) > 0.1 or abs(last_y - final_y) > 0.1:
+                        self.canvas.create_line(last_x, last_y, final_x, final_y, fill=color, tags=tag, **current_line_options)
 
 
     # --- Path Distance Calculation ---
@@ -721,20 +784,19 @@ class MazeEditor:
                 self.v_walls[start_r][start_c + 1] = True
             path_check, msg_check = self._calculate_dijkstra_path(TURN_PENALTY_SHORTEST)
             if path_check:
+                self.current_maze_file = None
+                self._update_window_title()
                 self.find_and_draw_routes()
                 self.update_status("Maze generated.")
                 break
             else: pass
-
-    # --- Save/Load ---
-    # Removed save_maze (JSON) and load_maze (JSON) methods
 
     # --- Save/Load Text Format ---
     def save_maze_text(self):
         filename = filedialog.asksaveasfilename(
             defaultextension=".txt", filetypes=[("Text files", "*.txt"), ("All files", "*.*")],
             title="Save Maze As Text File" )
-        if not filename: return
+        if not filename: return False # Indicate cancel/fail for check_save
         output_lines = []
         num_rows = 2 * GRID_SIZE + 1
         for out_r in range(num_rows):
@@ -759,15 +821,19 @@ class MazeEditor:
             output_lines.append(row_str)
         try:
             with open(filename, 'w') as f: f.write("\n".join(output_lines))
-            # --- Update filename and title ---
             self.current_maze_file = filename
+            self.maze_modified = False # Reset modified flag on successful save
             self._update_window_title()
-            # --- ---
             self.update_status(f"Maze saved to text file {filename}")
+            return True # Indicate success
         except Exception as e:
             messagebox.showerror("Save Text Error", f"Failed to save maze text:\n{e}"); self.update_status("Save text failed.")
+            return False # Indicate failure
 
     def load_maze_text(self):
+        """Loads maze wall data from a text file, after checking for save."""
+        if not self._check_save_before_action("loading new maze"): return
+
         filename = filedialog.askopenfilename(
             filetypes=[("Text files", "*.txt"), ("All files", "*.*")], title="Load Maze Text File" )
         if not filename: return
@@ -781,7 +847,7 @@ class MazeEditor:
             for r_idx, line in enumerate(lines):
                 if r_idx % 2 == 0: # Horizontal walls
                     r_wall = r_idx // 2
-                    if 0 < r_wall <= GRID_SIZE:
+                    if 0 <= r_wall <= GRID_SIZE:
                         for c_wall in range(GRID_SIZE):
                             char_idx = c_wall * 4 + 1
                             if char_idx < len(line): new_h_walls[r_wall][c_wall] = (line[char_idx] == '-')
@@ -793,61 +859,131 @@ class MazeEditor:
                              if char_idx < len(line): new_v_walls[r_cell][c_wall] = (line[char_idx] == '|')
             self.h_walls = new_h_walls; self.v_walls = new_v_walls
             self.initialize_outer_walls()
-            # --- Update filename and title ---
             self.current_maze_file = filename
+            self.maze_modified = False # Reset flag
             self._update_window_title()
-            # --- ---
             self.find_and_draw_routes()
             self.update_status(f"Maze loaded from text file {filename}")
         except FileNotFoundError:
              messagebox.showerror("Load Text Error", f"File not found:\n{filename}"); self.update_status("Load text failed: File not found.")
-             self.current_maze_file = None; self._update_window_title()
+             self.current_maze_file = None; self.maze_modified = False; self._update_window_title()
         except ValueError as e:
              messagebox.showerror("Load Text Error", f"Invalid maze file format:\n{e}"); self.update_status(f"Load text failed: {e}")
-             self.current_maze_file = None; self._update_window_title()
+             self.current_maze_file = None; self.maze_modified = False; self._update_window_title()
         except Exception as e:
             messagebox.showerror("Load Text Error", f"Failed to load maze text:\n{e}"); self.update_status("Load text failed.")
-            self.current_maze_file = None; self._update_window_title()
+            self.current_maze_file = None; self.maze_modified = False; self._update_window_title()
 
 
-    def download_mazes(self):
-        """Downloads maze files from the specified GitHub repository after confirmation."""
+    def fetch_github_maze_list(self): # Renamed from download_mazes
+        """Fetches the list of maze files from GitHub and prompts user to select one."""
+        if not self._check_save_before_action("loading from GitHub"): return
+
         api_url = "https://api.github.com/repos/micromouseonline/mazefiles/contents/classic"
-        local_folder = DOWNLOAD_FOLDER
-        confirm = messagebox.askyesno("Confirm Download", f"Download maze files into '{local_folder}'?")
-        if not confirm: self.update_status("Download cancelled."); return
-
-        self.update_status(f"Attempting to download mazes to '{local_folder}'...")
+        self.update_status("Fetching maze list from GitHub...")
         self.master.update()
         try:
-            os.makedirs(local_folder, exist_ok=True)
-            response = requests.get(api_url, timeout=15)
-            response.raise_for_status()
+            response = requests.get(api_url, timeout=15); response.raise_for_status()
             files_data = response.json()
             if not isinstance(files_data, list): raise ValueError("Invalid response format from GitHub API")
-            downloaded_count = 0; skipped_count = 0
+            maze_files = {}
             for item in files_data:
                 if item.get("type") == "file" and item.get("name", "").lower().endswith(".txt"):
                     file_name = item["name"]; download_url = item.get("download_url")
-                    local_path = os.path.join(local_folder, file_name)
-                    if not download_url: print(f"Warning: No download URL for {file_name}"); skipped_count += 1; continue
-                    try:
-                        self.update_status(f"Downloading {file_name}..."); self.master.update()
-                        file_response = requests.get(download_url, timeout=10)
-                        file_response.raise_for_status()
-                        with open(local_path, 'w', encoding='utf-8') as f: f.write(file_response.text)
-                        downloaded_count += 1
-                    except requests.exceptions.RequestException as req_err: print(f"Warning: Failed to download {file_name}: {req_err}"); skipped_count += 1
-                    except IOError as io_err: print(f"Warning: Failed to save {file_name}: {io_err}"); skipped_count += 1
-                    except Exception as e: print(f"Warning: Error processing {file_name}: {e}"); skipped_count += 1
-            final_message = f"Download complete: {downloaded_count} mazes saved"
-            if skipped_count > 0: final_message += f" ({skipped_count} skipped/failed)."
-            self.update_status(final_message)
-            messagebox.showinfo("Download Complete", final_message + f"\nMazes saved in '{local_folder}' folder.")
-        except requests.exceptions.RequestException as e: messagebox.showerror("Download Error", f"Failed to fetch maze list from GitHub:\n{e}"); self.update_status("Maze download failed (network error).")
-        except ValueError as e: messagebox.showerror("Download Error", f"Failed to parse GitHub response:\n{e}"); self.update_status("Maze download failed (API format error).")
-        except OSError as e: messagebox.showerror("Download Error", f"Failed create directory '{local_folder}':\n{e}"); self.update_status("Maze download failed (file system error).")
-        except Exception as e: messagebox.showerror("Download Error", f"An unexpected error occurred:\n{e}"); self.update_status("Maze download failed (unexpected error).")
+                    if download_url: maze_files[file_name] = download_url
+            if not maze_files:
+                messagebox.showinfo("No Mazes Found", "Could not find any .txt maze files in the repository directory.")
+                self.update_status("No .txt mazes found on GitHub."); return
+            self.update_status("Maze list fetched. Please select a maze.")
+            self._show_download_selection_dialog(maze_files)
+        except requests.exceptions.RequestException as e: messagebox.showerror("Fetch Error", f"Failed to fetch maze list from GitHub:\n{e}"); self.update_status("Failed to fetch maze list (network error).")
+        except ValueError as e: messagebox.showerror("Fetch Error", f"Failed to parse GitHub response:\n{e}"); self.update_status("Failed to fetch maze list (API format error).")
+        except Exception as e: messagebox.showerror("Fetch Error", f"An unexpected error occurred:\n{e}"); self.update_status("Failed to fetch maze list (unexpected error).")
+
+    def _show_download_selection_dialog(self, maze_files):
+        """Creates a Toplevel window to select a maze file to download and load."""
+        dialog = Toplevel(self.master); dialog.title("Select Maze to Download")
+        dialog.geometry("350x450"); dialog.transient(self.master); dialog.grab_set()
+        # Search Bar
+        search_frame = Frame(dialog); search_frame.pack(pady=(10,0), padx=10, fill=tk.X)
+        Label(search_frame, text="Search:").pack(side=tk.LEFT) # Corrected Label
+        search_var = StringVar()
+        search_entry = Entry(search_frame, textvariable=search_var, width=30)
+        search_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(5,0))
+        # Listbox
+        Label(dialog, text="Select a maze file:").pack(pady=(5, 5))
+        list_frame = Frame(dialog); list_frame.pack(pady=5, padx=10, fill=tk.BOTH, expand=True)
+        scrollbar = Scrollbar(list_frame); scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        listbox = Listbox(list_frame, yscrollcommand=scrollbar.set, exportselection=False, selectmode=SINGLE)
+        listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True); scrollbar.config(command=listbox.yview)
+        sorted_filenames = sorted(maze_files.keys())
+        # Filter logic
+        def _update_github_listbox(event=None):
+            search_term = search_var.get().lower()
+            listbox.delete(0, END)
+            for filename in sorted_filenames:
+                if search_term in filename.lower(): listbox.insert(END, filename)
+        search_entry.bind("<KeyRelease>", _update_github_listbox)
+        _update_github_listbox() # Initial population
+        # Selection logic
+        def on_select():
+            selection_indices = listbox.curselection()
+            if not selection_indices: messagebox.showwarning("No Selection", "Please select a maze file.", parent=dialog); return
+            selected_filename = listbox.get(selection_indices[0])
+            download_url = maze_files.get(selected_filename)
+            if download_url: dialog.destroy(); self._download_and_load_selected_maze(selected_filename, download_url)
+            else: messagebox.showerror("Error", f"Could not find download URL for {selected_filename}", parent=dialog)
+        # Buttons
+        button_frame = Frame(dialog); button_frame.pack(pady=10)
+        Button(button_frame, text="Load Selected", command=on_select).pack(side=tk.LEFT, padx=10)
+        Button(button_frame, text="Cancel", command=dialog.destroy).pack(side=tk.LEFT, padx=10)
+        listbox.bind("<Double-Button-1>", lambda e: on_select())
+        search_entry.focus_set()
+        dialog.wait_window()
+
+    def _download_and_load_selected_maze(self, filename, download_url):
+        """Downloads a specific maze file and loads it."""
+        # Save check already done before opening dialog
+        self.update_status(f"Downloading {filename}..."); self.master.update()
+        try:
+            file_response = requests.get(download_url, timeout=15); file_response.raise_for_status()
+            maze_text_content = file_response.text
+            lines = maze_text_content.splitlines()
+            lines = [line.rstrip() for line in lines if line.strip()]
+            expected_rows = 2 * GRID_SIZE + 1; expected_cols = 4 * GRID_SIZE + 1
+            if len(lines) != expected_rows: raise ValueError(f"Invalid rows. Expected {expected_rows}, found {len(lines)}.")
+            if len(lines[0]) < expected_cols: raise ValueError(f"Invalid cols. Expected {expected_cols}, found {len(lines[0])}.")
+            new_h_walls = [[False for _ in range(GRID_SIZE)] for _ in range(GRID_SIZE + 1)]
+            new_v_walls = [[False for _ in range(GRID_SIZE + 1)] for _ in range(GRID_SIZE)]
+            for r_idx, line in enumerate(lines):
+                if r_idx % 2 == 0: # Horizontal walls
+                    r_wall = r_idx // 2
+                    if 0 <= r_wall <= GRID_SIZE:
+                        for c_wall in range(GRID_SIZE):
+                            char_idx = c_wall * 4 + 1
+                            if char_idx < len(line): new_h_walls[r_wall][c_wall] = (line[char_idx] == '-')
+                else: # Vertical walls
+                    r_cell = (r_idx - 1) // 2
+                    if 0 <= r_cell < GRID_SIZE:
+                        for c_wall in range(GRID_SIZE + 1):
+                             char_idx = c_wall * 4
+                             if char_idx < len(line): new_v_walls[r_cell][c_wall] = (line[char_idx] == '|')
+            self.h_walls = new_h_walls; self.v_walls = new_v_walls
+            self.initialize_outer_walls() # Re-apply outer walls
+            self.current_maze_file = f"GitHub: {filename}" # Indicate source
+            self.maze_modified = False # Reset flag
+            self._update_window_title()
+            self.find_and_draw_routes()
+            self.update_status(f"Loaded maze '{filename}' from GitHub.")
+        except requests.exceptions.RequestException as e:
+             messagebox.showerror("Download Error", f"Failed to download maze '{filename}':\n{e}"); self.update_status("Maze download failed (network error).")
+             self.current_maze_file = None; self.maze_modified = False; self._update_window_title()
+        except ValueError as e:
+             messagebox.showerror("Load Error", f"Invalid maze file format in '{filename}':\n{e}"); self.update_status(f"Load failed: {e}")
+             self.current_maze_file = None; self.maze_modified = False; self._update_window_title()
+        except Exception as e:
+            messagebox.showerror("Load Error", f"Failed to process maze '{filename}':\n{e}"); self.update_status("Load failed.")
+            self.current_maze_file = None; self.maze_modified = False; self._update_window_title()
 
 
     def update_status(self, message):
