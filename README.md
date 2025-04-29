@@ -17,3 +17,5 @@ The diagonal route solving leaves something to be desired, but I left it in anyw
 Install Python 3
 To install dependencies, run
 pip install -r requirements.txt 
+
+On Windows, double-click the .pyw file to run, on Linux, anything goes
