@@ -10,6 +10,8 @@ You can also highlight cells with no walls, as these can be difficult to navigat
 
 A random maze generator is also included to give you a head start.
 
+The goal can be selected by clicking a cell with the shift key pressed.
+
 The diagonal route solving leaves something to be desired, but I left it in anyway.
 
 ## to install 
