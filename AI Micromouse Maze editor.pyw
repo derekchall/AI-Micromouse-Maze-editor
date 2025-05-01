@@ -29,7 +29,8 @@ ROUTE_WIDTH = 2
 CELL_PHYSICAL_SIZE_M = 0.18 # 18 cm per cell
 MAZE_GENERATION_LOOP_PROBABILITY = 0.15
 DOWNLOAD_FOLDER = "downloaded_mazes"
-BASE_SMOOTHING_FACTOR = 1000 # <<< Base smoothing factor at default cell size
+# <<< MODIFIED BASE_SMOOTHING_FACTOR >>>
+BASE_SMOOTHING_FACTOR = 1500 # Base smoothing factor at default cell size
 
 # Colors
 COLOR_BACKGROUND = "white"; COLOR_POST = "black"; COLOR_WALL = "blue"
@@ -104,7 +105,6 @@ class MazeEditor:
         # --- End Order Change ---
 
         # Set initial logical size and reset data structures
-        # This call will NOT trigger handle_resize or redraw directly anymore
         self._set_grid_size(initial_size, is_initial=True)
 
         # Bindings
@@ -180,9 +180,9 @@ class MazeEditor:
             if self.grid_size not in [16, 32]: self.grid_size = DEFAULT_GRID_SIZE
             self.selected_size_var.set(str(self.grid_size)); return False
 
-        if not is_initial and self.grid_size == new_size: return True # No change needed
+        # Avoid redundant work if size isn't actually changing (unless initial setup)
+        if not is_initial and self.grid_size == new_size: return True
 
-        # REMOVED Debug Print
         self.grid_size = new_size
         self.selected_size_var.set(str(new_size))
 
@@ -191,7 +191,8 @@ class MazeEditor:
         self.start_pos_lh = (self.grid_size - 1, 0, N4)
         center_r1 = self.grid_size // 2 - 1; center_c1 = self.grid_size // 2 - 1
         self._default_goal_cells = {(r,c) for r in range(center_r1, center_r1+2) for c in range(center_c1, center_c1+2)}
-        if not is_initial or not self.goal_cells: # Reset goal if not initial setup or if goal was empty
+        # Reset goal only if not initial setup or if goal set was somehow empty before
+        if not is_initial or not self.goal_cells:
              self.goal_cells = self._default_goal_cells.copy()
 
         # Reinitialize wall arrays
@@ -206,14 +207,13 @@ class MazeEditor:
 
         self._update_window_title()
 
-        # --- REMOVED handle_resize call from here ---
+        # --- REMOVED handle_resize call ---
 
-        # Reset maze walls, always skip redraw as drawing is handled elsewhere
-        # For initial call, skip redraw because handle_resize at end of __init__ does it.
-        # For non-initial call, skip redraw because handle_resize triggered by on_size_select_change will do it.
+        # Reset maze walls, skip redraw logic moved to appropriate callers
         self.reset_maze(add_start_wall=True, called_from_set_size=True, skip_redraw=True)
 
         return True
+
 
     @property
     def click_tolerance(self): return self.cell_visual_size_px * 0.4
@@ -305,6 +305,7 @@ class MazeEditor:
     def _perform_resize_check(self):
          self.resize_timer = None
          current_width = self.master.winfo_width(); current_height = self.master.winfo_height()
+         # Only handle if size actually changed significantly
          if abs(current_width - self.last_width) > 5 or abs(current_height - self.last_height) > 5:
              self.handle_resize(current_width, current_height)
 
@@ -318,7 +319,6 @@ class MazeEditor:
                   self.master.after(50, lambda: self.handle_resize(self.master.winfo_width(), self.master.winfo_height())) # Retry shortly
                   return
         except Exception:
-             # Fallback estimation if winfo fails
              estimated_control_height = 100
              canvas_width = width - 2 * MARGIN; canvas_height = height - estimated_control_height
              if canvas_width <= 0 or canvas_height <= 0: return # Still invalid
@@ -467,7 +467,6 @@ class MazeEditor:
         if cell_size <= 0: return None
         r_approx_cell, c_approx_cell = self.pixel_to_cell(click_x, click_y)
         if r_approx_cell < 0: return None
-
         for r_wall_check in range(max(0, r_approx_cell), min(gs + 1, r_approx_cell + 2)):
             for c_cell_check in range(max(0, c_approx_cell - 1), min(gs, c_approx_cell + 2)):
                 if 0 < r_wall_check < gs:
@@ -524,12 +523,12 @@ class MazeEditor:
         # Walls
         for r_wall in range(gs + 1):
             for c_wall in range(gs):
-                if self.h_walls[r_wall][c_wall]:
+                if r_wall < len(self.h_walls) and c_wall < len(self.h_walls[0]) and self.h_walls[r_wall][c_wall]:
                     x0, y0 = self.cell_to_pixel(r_wall, c_wall); x1 = x0 + cell_size; y1 = y0
                     self.canvas.create_line(x0, y0, x1, y1, fill=COLOR_WALL, width=WALL_THICKNESS, tags="wall")
         for r_wall in range(gs):
             for c_wall in range(gs + 1):
-                 if self.v_walls[r_wall][c_wall]:
+                 if r_wall < len(self.v_walls) and c_wall < len(self.v_walls[0]) and self.v_walls[r_wall][c_wall]:
                     x0, y0 = self.cell_to_pixel(r_wall, c_wall); x1 = x0; y1 = y0 + cell_size
                     self.canvas.create_line(x0, y0, x1, y1, fill=COLOR_WALL, width=WALL_THICKNESS, tags="wall")
         # Posts
@@ -635,7 +634,7 @@ class MazeEditor:
             if not path or path[-1] != (r,c): path.append((r, c))
         if found_goal: return path, f"Goal ({len(path) - 1} steps)"
         elif step_count >= max_steps: return path, f"Max steps ({max_steps})"
-        else: return path, "Unreachable" # Changed from End?
+        else: return path, "Unreachable"
 
     def _calculate_dijkstra_path(self, turn_weight):
         gs = self.grid_size
@@ -931,8 +930,12 @@ class MazeEditor:
         """Creates a Toplevel window to select maze size and file, including preview."""
         dialog = Toplevel(self.master); dialog.title("Load Maze from GitHub"); dialog.geometry("550x480"); dialog.transient(self.master); dialog.grab_set()
         dialog_size_var = tk.StringVar(value=self.selected_size_var.get()) # Default to main window's selection
-        maze_files_dict = {}
+        maze_files_dict = {} # Filename -> URL mapping for current size
+        # <<< Store the full list of names for the current size >>>
+        current_sorted_filenames = []
+        # --- Dialog State ---
         self.preview_canvas = None; self.preview_after_id = None; self.selected_maze_url = None
+        # --- GUI Layout (Frames, Search, Listbox, Preview, Buttons) ---
         main_frame = Frame(dialog); main_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
         main_frame.rowconfigure(2, weight=1); main_frame.columnconfigure(0, weight=1); main_frame.columnconfigure(1, weight=0)
         top_frame = Frame(main_frame); top_frame.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 10))
@@ -943,10 +946,12 @@ class MazeEditor:
         search_frame = Frame(main_frame); search_frame.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(0, 5))
         Label(search_frame, text="Search:").pack(side=tk.LEFT); search_var = StringVar(); search_entry = Entry(search_frame, textvariable=search_var, width=40); search_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(5,0))
         list_frame = Frame(main_frame); list_frame.grid(row=2, column=0, sticky="nsew", padx=(0, 5)); scrollbar = Scrollbar(list_frame, orient=tk.VERTICAL); scrollbar.pack(side=tk.RIGHT, fill=tk.Y); listbox = Listbox(list_frame, yscrollcommand=scrollbar.set, exportselection=False, selectmode=SINGLE); listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True); scrollbar.config(command=listbox.yview)
-        preview_frame = Frame(main_frame, bd=1, relief=tk.SUNKEN); preview_frame.grid(row=2, column=1, sticky="nsew", padx=(5, 0)); PREVIEW_SIZE = 180; self.preview_canvas = Canvas(preview_frame, width=PREVIEW_SIZE, height=PREVIEW_SIZE, bg="white", bd=0, highlightthickness=0); self.preview_canvas.pack(padx=2, pady=2)
+        preview_frame = Frame(main_frame, bd=1, relief=tk.SUNKEN); preview_frame.grid(row=2, column=1, sticky="nsew", padx=(5, 0)); PREVIEW_SIZE = 180; self.preview_canvas = Canvas(preview_frame, width=PREVIEW_SIZE, height=PREVIEW_SIZE, bg="white", bd=0, highlightthickness=0); self.preview_canvas.pack(padx=2, pady=2);
         button_frame = Frame(main_frame); button_frame.grid(row=3, column=0, columnspan=2, pady=(10, 0)); Button(button_frame, text="Load Selected", command=lambda: on_load_confirm(listbox, maze_files_dict, dialog), width=12).pack(side=tk.LEFT, padx=10); Button(button_frame, text="Cancel", command=dialog.destroy, width=12).pack(side=tk.LEFT, padx=10)
 
+        # --- Helper Function to Fetch List and Update UI ---
         def _fetch_list_and_update_ui(parent_dialog, lb, size_var, files_dict_ref):
+            nonlocal current_sorted_filenames # Allow modification
             lb.delete(0, END); files_dict_ref.clear(); search_var.set("")
             if self.preview_canvas: self.preview_canvas.delete("all")
             if self.preview_after_id: parent_dialog.after_cancel(self.preview_after_id); self.preview_after_id = None
@@ -959,11 +964,12 @@ class MazeEditor:
             try:
                 response = requests.get(api_url, timeout=15); response.raise_for_status(); data = response.json()
                 if not isinstance(data, list): raise ValueError("Invalid API response")
+                files_dict_ref.clear() # Ensure dict is clear before populating
                 for item in data:
                     if isinstance(item,dict) and item.get('type')=='file' and item.get('name','').lower().endswith((".txt",".maze")) and item.get('download_url'):
                          files_dict_ref[item['name']] = item['download_url']
-                sorted_names = sorted(files_dict_ref.keys(), key=str.lower)
-                for name in sorted_names: lb.insert(END, name)
+                current_sorted_filenames = sorted(files_dict_ref.keys(), key=str.lower) # Store full list
+                for name in current_sorted_filenames: lb.insert(END, name) # Populate listbox
                 if self.preview_canvas:
                      self.preview_canvas.delete("all")
                      msg = "Select a maze\nto preview" if files_dict_ref else f"No {size_str}x{size_str} mazes\nfound in repo."
@@ -975,38 +981,45 @@ class MazeEditor:
                       self.preview_canvas.delete("all"); self.preview_canvas.create_text(PREVIEW_SIZE/2, PREVIEW_SIZE/2, text=err_msg, justify=tk.CENTER, fill="red")
                  print(f"Error fetching GitHub list: {e}")
 
+        # --- Search/Filter Logic (Modified) ---
         def _update_listbox_filter(*args):
             search_term = search_var.get().lower().strip(); listbox.delete(0, END)
-            sorted_names = sorted(maze_files_dict.keys(), key=str.lower)
-            [listbox.insert(END,n) for n in sorted_names if not term or term in n.lower()]
-            if self.preview_canvas: self.preview_canvas.delete("all"); self.preview_canvas.create_text(PREVIEW_SIZE/2, PREVIEW_SIZE/2, text="(No selection)", fill="grey")
-            if self.preview_after_id: dialog.after_cancel(self.preview_after_id); self.preview_after_id = None; self.selected_maze_url = None
-        search_var.trace_add("write", _update_listbox_filter)
+            # <<< Filter using the stored full list >>>
+            for filename in current_sorted_filenames: # Iterate stored full list
+                if not search_term or search_term in filename.lower():
+                    listbox.insert(END, filename)
+            # Clear preview when list is filtered
+            if self.preview_canvas: self.preview_canvas.delete("all"); self.preview_canvas.create_text(PREVIEW_SIZE/2, PREVIEW_SIZE/2, text="(Filter active)", fill="grey") # Indicate filtering
+            if self.preview_after_id: dialog.after_cancel(self.preview_after_id); self.preview_after_id = None
+            self.selected_maze_url = None
+        search_var.trace_add("write", _update_listbox_filter) # Filter existing list
 
+        # --- Preview Update Logic (from list selection)---
         def _fetch_and_draw_preview(filename, url):
             if not self.preview_canvas or not self.preview_canvas.winfo_exists(): return
             self.preview_canvas.delete("all"); self.preview_canvas.create_text(PREVIEW_SIZE/2, PREVIEW_SIZE/2, text=f"Loading\n{filename}...", justify=tk.CENTER, fill="blue"); self.preview_canvas.update_idletasks()
             try:
                 response = requests.get(url, timeout=10); response.raise_for_status()
                 content = response.text; lines = content.splitlines(); lines = [line.rstrip() for line in lines if line.strip()]
-                preview_grid_size = -1
+                preview_grid_size = -1 # Detect size
                 if len(lines)==2*16+1: preview_grid_size=16
                 elif len(lines)==2*32+1: preview_grid_size=32
                 else: raise ValueError(f"Invalid rows")
                 expected_cols = 4*preview_grid_size+1
                 if not lines or len(lines[0])<expected_cols: raise ValueError(f"Invalid cols")
                 gs = preview_grid_size
+                # Parse walls (using standard loops)
                 h_w=[[False for _ in range(gs)] for _ in range(gs+1)]; v_w=[[False for _ in range(gs+1)] for _ in range(gs)]
                 for r_idx, line in enumerate(lines):
-                    if r_idx%2==0:
+                    if r_idx%2==0: # H walls
                         r_wall = r_idx//2
                         if 0<=r_wall<=gs:
                             for c in range(gs): char_idx=c*4+2; h_w[r_wall][c]=(line[char_idx]=='-') if char_idx<len(line) else False
-                    else:
+                    else: # V walls
                         r_cell=(r_idx-1)//2
                         if 0<=r_cell<gs:
                             for c in range(gs+1): char_idx=c*4; v_w[r_cell][c]=(line[char_idx]=='|') if char_idx<len(line) else False
-                self._draw_maze_on_canvas(self.preview_canvas, h_w, v_w, PREVIEW_SIZE, grid_size_override=gs)
+                self._draw_maze_on_canvas(self.preview_canvas, h_w, v_w, PREVIEW_SIZE, grid_size_override=gs) # Pass size
             except (requests.exceptions.RequestException, ValueError, IndexError, Exception) as e:
                  if self.preview_canvas and self.preview_canvas.winfo_exists():
                      self.preview_canvas.delete("all"); err_msg = f"Preview Error:\n{type(e).__name__}"
@@ -1026,13 +1039,19 @@ class MazeEditor:
                 if self.preview_canvas: self.preview_canvas.delete("all"); self.preview_canvas.create_text(PREVIEW_SIZE/2, PREVIEW_SIZE/2, text="Error:\nURL missing?", fill="red")
                 self.selected_maze_url = None
         listbox.bind("<<ListboxSelect>>", _on_preview_selection)
+
+        # --- Load Confirmation Logic ---
         def on_load_confirm(lb, files_dict, dlg):
             idx = lb.curselection(); filename=lb.get(idx[0]) if idx else None; url=files_dict.get(filename) if filename else None
             if url: dlg.destroy(); self._download_and_load_selected_maze(filename, url)
             else: messagebox.showwarning("Select", "Please select a maze file.", parent=dlg)
         listbox.bind("<Double-1>", lambda e:on_load_confirm(listbox, maze_files_dict, dialog)); listbox.bind("<Return>", lambda e:on_load_confirm(listbox, maze_files_dict, dialog))
-        _fetch_list_and_update_ui(dialog, listbox, dialog_size_var, maze_files_dict) # Initial fetch
+
+        # --- Initial Fetch ---
+        _fetch_list_and_update_ui(dialog, listbox, dialog_size_var, maze_files_dict)
+
         search_entry.focus_set(); dialog.wait_window()
+
 
     def _draw_maze_on_canvas(self, target_canvas, h_walls, v_walls, target_size_px, grid_size_override=None):
         """Draws a simplified maze representation onto a given canvas."""
@@ -1057,6 +1076,7 @@ class MazeEditor:
                         target_canvas.create_line(x0,y0,x1,y1, fill=wall_color, width=wall_thickness, tags="preview_wall")
         except IndexError: target_canvas.delete("all"); target_canvas.create_text(target_size_px/2, target_size_px/2, text="Preview Error:\nIndex Error", justify=tk.CENTER, fill="red")
         except Exception as e: target_canvas.delete("all"); target_canvas.create_text(target_size_px/2, target_size_px/2, text=f"Preview Error:\n{type(e).__name__}", justify=tk.CENTER, fill="red")
+
 
     def _download_and_load_selected_maze(self, filename, download_url):
         """Downloads the content, detects size, and loads it."""
@@ -1090,7 +1110,7 @@ class MazeEditor:
                                 if content_idx + 2 < len(line) and line[content_idx:content_idx+3] == " G ":
                                     loaded_goal_cells.add((r_cell, c))
             self.h_walls=new_h; self.v_walls=new_v; self.initialize_outer_walls()
-            self.goal_cells = loaded_goal_cells if loaded_goal_cells else self._default_goal_cells.copy() # Use loaded goals or default
+            self.goal_cells = loaded_goal_cells if loaded_goal_cells else self._default_goal_cells.copy()
             self.current_maze_file = f"GitHub: {filename}"; self.maze_modified=False
             self._update_window_title(); self.find_and_draw_routes()
             self.update_status(f"Loaded {gs}x{gs} maze '{filename}' from GitHub.")
@@ -1098,6 +1118,7 @@ class MazeEditor:
         except requests.exceptions.RequestException as e: messagebox.showerror("Error", f"Network error dl:\n{e}", parent=self.master); self.update_status("Download failed (network)."); self.current_maze_file=None; self.maze_modified=False; self._update_window_title()
         except ValueError as e: messagebox.showerror("Error", f"Invalid format/size '{filename}':\n{e}", parent=self.master); self.update_status(f"Load failed: {e}"); self.current_maze_file=None; self.maze_modified=False; self._update_window_title()
         except Exception as e: messagebox.showerror("Error", f"Failed process '{filename}':\n{e}", parent=self.master); self.update_status("Load failed."); self.current_maze_file=None; self.maze_modified=False; self._update_window_title()
+
 
     def update_status(self, message):
         self.status_label.config(text=message)
