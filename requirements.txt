@@ -1,1 +1,3 @@
-requests
+numpy        # Required by SciPy and for numerical operations
+scipy        # Used for route smoothing (scipy.interpolate)
+requests     # Used for fetching maze lists/files from GitHub
