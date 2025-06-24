@@ -23,17 +23,20 @@ except ImportError:
 DEFAULT_GRID_SIZE = 16 # Default size for new mazes
 DEFAULT_CELL_VISUAL_SIZE_PX = 25 # Base size for scaling smoothing
 MARGIN = 25
-POST_RADIUS = 2
-WALL_THICKNESS = 2
 ROUTE_WIDTH = 2
-CELL_PHYSICAL_SIZE_M = 0.18 # 18 cm per cell
 MAZE_GENERATION_LOOP_PROBABILITY = 0.15
 DOWNLOAD_FOLDER = "downloaded_mazes"
-# <<< MODIFIED BASE_SMOOTHING_FACTOR >>>
 BASE_SMOOTHING_FACTOR = 1500 # Base smoothing factor at default cell size
+
+# Physical dimensions for scaling
+CELL_PHYSICAL_SIZE_M = 0.180      # 180 mm per cell
+WALL_PHYSICAL_THICKNESS_M = 0.012 # 12 mm for wall thickness
+# <<< MODIFIED >>> Added a specific size for posts
+POST_PHYSICAL_SIZE_M = 0.014      # 14 mm for post side length
 
 # Colors
 COLOR_BACKGROUND = "white"; COLOR_POST = "black"; COLOR_WALL = "blue"
+COLOR_WALL_SEEN = "red"
 COLOR_START = "lightgreen"; COLOR_GOAL = "lightblue"; COLOR_GRID_LINE = "#eee"
 COLOR_ROUTE_LEFT = "red"; COLOR_ROUTE_SHORTEST = "purple"
 COLOR_ROUTE_STRAIGHTEST = "darkorange"; COLOR_ROUTE_DIAGONAL = "forest green"
@@ -99,6 +102,20 @@ class MazeEditor:
         self.preview_after_id = None
         self.selected_maze_url = None
 
+        # --- Mouse Simulation State ---
+        self.mouse_sim_running = False
+        self.show_sim_results = False
+        self.mouse_sim_phase = None # "EXPLORE", "RETURN_TO_START", "SPEED_RUN"
+        self.mouse_r, self.mouse_c = 0, 0
+        self.mouse_dir4 = N4 # Default starting direction
+        self.mouse_seen_h_walls = []
+        self.mouse_seen_v_walls = []
+        self.mouse_trail = [] # List of (r,c) cells visited in current run
+        self.mouse_after_id = None # For scheduling next step
+        self.mouse_walls_seen_count = 0
+        self.mouse_run_count = 0
+
+
         # --- GUI Setup Order Change ---
         self._setup_gui()           # Create frames, canvas, status bar, **key_frame**
         self._create_color_key()    # Create the labels within key_frame -> self.key_label_xxx exist now
@@ -118,6 +135,21 @@ class MazeEditor:
 
         # --- Schedule the initial resize/draw slightly after mainloop starts ---
         self.master.after(10, lambda: self.handle_resize(self.master.winfo_width(), self.master.winfo_height()))
+
+    # <<< MODIFIED >>> Replaced radius property with a size property for square posts
+    @property
+    def scaled_wall_thickness(self):
+        """Calculates wall thickness in pixels based on physical size ratio."""
+        if self.cell_visual_size_px <= 0: return 1
+        ratio = WALL_PHYSICAL_THICKNESS_M / CELL_PHYSICAL_SIZE_M
+        return max(1, self.cell_visual_size_px * ratio)
+
+    @property
+    def scaled_post_size(self):
+        """Calculates post side length in pixels based on physical size ratio."""
+        if self.cell_visual_size_px <= 0: return 2
+        ratio = POST_PHYSICAL_SIZE_M / CELL_PHYSICAL_SIZE_M
+        return max(2, self.cell_visual_size_px * ratio)
 
 
     # --- Callbacks ---
@@ -180,9 +212,9 @@ class MazeEditor:
             if self.grid_size not in [16, 32]: self.grid_size = DEFAULT_GRID_SIZE
             self.selected_size_var.set(str(self.grid_size)); return False
 
-        # Avoid redundant work if size isn't actually changing (unless initial setup)
-        if not is_initial and self.grid_size == new_size: return True
+        if not is_initial and self.grid_size == new_size: return True # No change needed
 
+        self.show_sim_results = False
         self.grid_size = new_size
         self.selected_size_var.set(str(new_size))
 
@@ -191,8 +223,7 @@ class MazeEditor:
         self.start_pos_lh = (self.grid_size - 1, 0, N4)
         center_r1 = self.grid_size // 2 - 1; center_c1 = self.grid_size // 2 - 1
         self._default_goal_cells = {(r,c) for r in range(center_r1, center_r1+2) for c in range(center_c1, center_c1+2)}
-        # Reset goal only if not initial setup or if goal set was somehow empty before
-        if not is_initial or not self.goal_cells:
+        if not is_initial or not self.goal_cells: # Reset goal if not initial setup or if goal was empty
              self.goal_cells = self._default_goal_cells.copy()
 
         # Reinitialize wall arrays
@@ -207,13 +238,10 @@ class MazeEditor:
 
         self._update_window_title()
 
-        # --- REMOVED handle_resize call ---
-
-        # Reset maze walls, skip redraw logic moved to appropriate callers
+        # Reset maze walls, always skip redraw as drawing is handled elsewhere
         self.reset_maze(add_start_wall=True, called_from_set_size=True, skip_redraw=True)
 
         return True
-
 
     @property
     def click_tolerance(self): return self.cell_visual_size_px * 0.4
@@ -222,37 +250,30 @@ class MazeEditor:
         """Creates the main GUI elements."""
         self.master.rowconfigure(1, weight=1); self.master.columnconfigure(0, weight=1)
         top_control_frame = Frame(self.master); top_control_frame.grid(row=0, column=0, sticky="ew", pady=(10, 0), padx=10)
-        # Left Controls
         left_ctrl_frame = Frame(top_control_frame); left_ctrl_frame.pack(side=tk.LEFT)
-        # Size Selection
         size_frame = Frame(left_ctrl_frame, bd=1, relief=tk.GROOVE); size_frame.pack(side=tk.LEFT, padx=5, pady=2)
         Label(size_frame, text="Size:").pack(side=tk.LEFT, padx=(5, 0))
         tk.Radiobutton(size_frame, text="16x16", variable=self.selected_size_var, value="16").pack(side=tk.LEFT)
         tk.Radiobutton(size_frame, text="32x32", variable=self.selected_size_var, value="32").pack(side=tk.LEFT, padx=(0, 5))
-        # Other Buttons
         Button(left_ctrl_frame, text="Reset Maze", command=self.reset_maze).pack(side=tk.LEFT, padx=5)
         Button(left_ctrl_frame, text="Generate Maze", command=self.generate_maze).pack(side=tk.LEFT, padx=5)
         Button(left_ctrl_frame, text="Save Maze", command=self.save_maze_text).pack(side=tk.LEFT, padx=5)
         Button(left_ctrl_frame, text="Load Maze", command=self.load_maze_text).pack(side=tk.LEFT, padx=5)
         Button(left_ctrl_frame, text="Load from GitHub", command=self.fetch_github_maze_list).pack(side=tk.LEFT, padx=5)
-        # Right Controls
+        Button(left_ctrl_frame, text="Simulate Mouse", command=self.start_mouse_simulation).pack(side=tk.LEFT, padx=10)
         right_controls_frame = Frame(top_control_frame); right_controls_frame.pack(side=tk.RIGHT, padx=10)
-        # Turn Weight
         weight_frame = Frame(right_controls_frame); weight_frame.pack(side=tk.LEFT, padx=5)
         Label(weight_frame, text="Turn W:").pack(side=tk.LEFT)
         vcmd_turn = (self.master.register(self.validate_float_entry), '%P')
         self.turn_weight_entry = Entry(weight_frame, textvariable=self.turn_weight_var, width=5, validate='key', validatecommand=vcmd_turn)
         self.turn_weight_entry.pack(side=tk.LEFT, padx=(2, 0))
-        # Highlight Toggle
         highlight_frame = Frame(right_controls_frame); highlight_frame.pack(side=tk.LEFT, padx=5)
         self.highlight_checkbutton = tk.Checkbutton(highlight_frame, text="Highlight Open", variable=self.highlight_open_cells_var, command=self.find_and_draw_routes)
         self.highlight_checkbutton.pack(side=tk.LEFT)
-        # Canvas
         initial_canvas_width = 2*MARGIN+DEFAULT_GRID_SIZE*DEFAULT_CELL_VISUAL_SIZE_PX
         initial_canvas_height = 2*MARGIN+DEFAULT_GRID_SIZE*DEFAULT_CELL_VISUAL_SIZE_PX
         self.canvas = Canvas(self.master, width=initial_canvas_width, height=initial_canvas_height, bg=COLOR_BACKGROUND)
         self.canvas.grid(row=1, column=0, sticky="nsew", pady=(5, 5), padx=10)
-        # Color Key & Status Bar
         self.key_frame = Frame(self.master, bd=1, relief=tk.GROOVE); self.key_frame.grid(row=2, column=0, sticky="ew", pady=(0, 5), padx=10)
         self.status_label = Label(self.master, text="Initializing...", bd=1, relief=tk.SUNKEN, anchor=tk.W); self.status_label.grid(row=3, column=0, sticky="ew", ipady=2)
 
@@ -273,6 +294,7 @@ class MazeEditor:
         self.key_label_diagonal = create_key_entry(self.key_frame, 3, COLOR_ROUTE_DIAGONAL, self.show_route_diagonal_var)
         self.key_label_smoothed = create_key_entry(self.key_frame, 4, COLOR_ROUTE_SMOOTHED, self.show_route_smoothed_var)
 
+    # <<< FUNCTION RE-ADDED >>>
     def validate_float_entry(self, P):
         """Validation function for float Entry widgets."""
         if P == "" or P == "." or P == "-": return True
@@ -296,7 +318,6 @@ class MazeEditor:
         if self.maze_modified: title += " *"
         self.master.title(title)
 
-    # --- Resizing Logic ---
     def schedule_resize(self, event=None):
         if event and event.widget != self.master: return
         if self.resize_timer is not None: self.master.after_cancel(self.resize_timer)
@@ -305,39 +326,30 @@ class MazeEditor:
     def _perform_resize_check(self):
          self.resize_timer = None
          current_width = self.master.winfo_width(); current_height = self.master.winfo_height()
-         # Only handle if size actually changed significantly
          if abs(current_width - self.last_width) > 5 or abs(current_height - self.last_height) > 5:
              self.handle_resize(current_width, current_height)
 
     def handle_resize(self, width, height):
-        """Recalculates cell size and redraws if size changed."""
         self.last_width = width; self.last_height = height
-        if not self.grid_size: return # Avoid division by zero if grid_size not set
+        if not self.grid_size: return
         try:
              canvas_width = self.canvas.winfo_width(); canvas_height = self.canvas.winfo_height()
-             if canvas_width <= 1 or canvas_height <= 1: # Canvas not ready yet
-                  self.master.after(50, lambda: self.handle_resize(self.master.winfo_width(), self.master.winfo_height())) # Retry shortly
+             if canvas_width <= 1 or canvas_height <= 1:
+                  self.master.after(50, lambda: self.handle_resize(self.master.winfo_width(), self.master.winfo_height()))
                   return
         except Exception:
              estimated_control_height = 100
              canvas_width = width - 2 * MARGIN; canvas_height = height - estimated_control_height
-             if canvas_width <= 0 or canvas_height <= 0: return # Still invalid
-
+             if canvas_width <= 0 or canvas_height <= 0: return
         cell_size_w = (canvas_width - 2 * MARGIN) / self.grid_size
         cell_size_h = (canvas_height - 2 * MARGIN) / self.grid_size
         new_cell_size = max(5, int(min(cell_size_w, cell_size_h)))
-
         if new_cell_size != self.cell_visual_size_px:
-            # REMOVED Debug Print
             self.cell_visual_size_px = new_cell_size
-            self.find_and_draw_routes() # Redraw required using the new cell size
-        elif not self.canvas.find_all(): # Force redraw on initial startup if canvas is empty
-             self.find_and_draw_routes()
+            self.find_and_draw_routes()
+        elif not self.canvas.find_all(): self.find_and_draw_routes()
 
-
-    # --- Maze Manipulation ---
     def initialize_outer_walls(self):
-        """Sets the outer boundary walls to True based on self.grid_size."""
         gs = self.grid_size
         if not self.h_walls or not self.v_walls or len(self.h_walls) < gs + 1 or len(self.v_walls) < gs: return
         for c in range(gs): self.h_walls[0][c] = self.h_walls[gs][c] = True
@@ -350,53 +362,37 @@ class MazeEditor:
         elif response is False: return True
         else: return False
 
-    # Modified reset_maze
     def reset_maze(self, add_start_wall=True, called_from_set_size=False, skip_redraw=False):
-        """Clears inner walls, recalculates routes, handling size changes."""
-        if not called_from_set_size: # Avoid check if called recursively
+        if not called_from_set_size:
              if not self._check_save_before_action("resetting"): return
-
-        target_size = self.grid_size # Default to current size
-        try: # Check selected size if not called recursively
+        target_size = self.grid_size
+        try:
             if not called_from_set_size:
                  target_size = int(self.selected_size_var.get())
                  if target_size not in [16, 32]: target_size = self.grid_size
-        except ValueError: pass # Ignore errors, keep current size
-
-        # Change size if necessary (only if not called from _set_grid_size)
+        except ValueError: pass
         if not called_from_set_size and self.grid_size != target_size:
-            self._set_grid_size(target_size) # This handles redraw via handle_resize
-            return # Exit, _set_grid_size completed the process
+            self._set_grid_size(target_size); return
 
-        # --- Resetting Current Size ---
+        self.show_sim_results = False
         gs = self.grid_size
         for r in range(1, gs):
             for c in range(gs): self.h_walls[r][c] = False
         for r in range(gs):
             for c in range(1, gs): self.v_walls[r][c] = False
-
-        # Reset goal to default for the current size (only if user initiated reset or goal empty)
         if not called_from_set_size or not self.goal_cells:
             center_r1 = gs // 2 - 1; center_c1 = gs // 2 - 1
             self._default_goal_cells = {(r,c) for r in range(center_r1, center_r1+2) for c in range(center_c1, center_c1+2)}
             self.goal_cells = self._default_goal_cells.copy()
-
-        # Add default start wall if requested
         if add_start_wall:
             try:
                 start_r, start_c = self.start_cell
                 if start_c + 1 <= gs: self.v_walls[start_r][start_c + 1] = True
             except IndexError: print("Warning: Could not add default start wall (index error).")
-
-        if not called_from_set_size: # Only clear file/modified if user initiated reset
-            self.current_maze_file = None
-            self.maze_modified = False
+        if not called_from_set_size:
+            self.current_maze_file = None; self.maze_modified = False
             self._update_window_title()
-
-        # Conditionally skip redraw
-        if not skip_redraw:
-            self.find_and_draw_routes() # Recalculate paths and redraw
-
+        if not skip_redraw: self.find_and_draw_routes()
         self.update_status(f"Maze reset to empty {gs}x{gs}.")
 
     def _initialize_all_walls(self):
@@ -411,20 +407,14 @@ class MazeEditor:
         self.route_path_straightest = []; self.route_path_diagonal = []
         self.straightest_path_pixel_vertices = []
         self.canvas.delete("route_left", "route_shortest", "route_straightest",
-                           "route_diagonal", "route_smoothed")
+                           "route_diagonal", "route_smoothed", "mouse_trail", "mouse_sim_indicator")
 
-    # --- Coordinate Conversion ---
     def cell_to_pixel(self, r, c):
-        x = MARGIN + c * self.cell_visual_size_px
-        y = MARGIN + r * self.cell_visual_size_px
-        return x, y
+        x = MARGIN + c * self.cell_visual_size_px; y = MARGIN + r * self.cell_visual_size_px; return x, y
     def cell_center_to_pixel(self, r, c, offset_x=0, offset_y=0):
-        x = MARGIN + (c + 0.5) * self.cell_visual_size_px + offset_x
-        y = MARGIN + (r + 0.5) * self.cell_visual_size_px + offset_y
-        return x, y
+        x = MARGIN + (c + 0.5) * self.cell_visual_size_px + offset_x; y = MARGIN + (r + 0.5) * self.cell_visual_size_px + offset_y; return x, y
     def wall_midpoint_to_pixel(self, r_cell, c_cell, direction4):
-        cell_size = self.cell_visual_size_px; center_x, center_y = self.cell_center_to_pixel(r_cell, c_cell)
-        half_cell = cell_size * 0.5
+        cell_size = self.cell_visual_size_px; center_x, center_y = self.cell_center_to_pixel(r_cell, c_cell); half_cell = cell_size * 0.5
         if direction4 == N4:   y_mid = center_y - half_cell; x_mid = center_x
         elif direction4 == E4: x_mid = center_x + half_cell; y_mid = center_y
         elif direction4 == S4: y_mid = center_y + half_cell; x_mid = center_x
@@ -432,17 +422,14 @@ class MazeEditor:
         else: return center_x, center_y
         return x_mid, y_mid
     def post_to_pixel(self, r_post, c_post):
-        x = MARGIN + c_post * self.cell_visual_size_px
-        y = MARGIN + r_post * self.cell_visual_size_px
-        return x, y
+        x = MARGIN + c_post * self.cell_visual_size_px; y = MARGIN + r_post * self.cell_visual_size_px; return x, y
     def pixel_to_cell(self, x, y):
-        if self.cell_visual_size_px <= 0: return (-1,-1) # Indicate invalid
+        if self.cell_visual_size_px <= 0: return (-1,-1)
         x_adj = x - MARGIN; y_adj = y - MARGIN
         c = int(x_adj / self.cell_visual_size_px); r = int(y_adj / self.cell_visual_size_px)
         if 0 <= r < self.grid_size and 0 <= c < self.grid_size: return r, c
-        else: return -1, -1 # Indicate out of bounds
+        else: return -1, -1
 
-    # --- Wall Handling & Events ---
     def has_wall(self, r, c, direction4):
         gs = self.grid_size
         if not (0 <= r < gs and 0 <= c < gs): return True
@@ -456,10 +443,10 @@ class MazeEditor:
     def _can_move_diag(self, r, c, diag_direction):
         gs = self.grid_size
         if not (0 <= r < gs and 0 <= c < gs): return False
-        if diag_direction == NE: return not self.has_wall(r, c, N4) and not self.has_wall(r, c, E4)
-        elif diag_direction == SE: return not self.has_wall(r, c, S4) and not self.has_wall(r, c, E4)
-        elif diag_direction == SW: return not self.has_wall(r, c, S4) and not self.has_wall(r, c, W4)
-        elif diag_direction == NW: return not self.has_wall(r, c, N4) and not self.has_wall(r, c, W4)
+        if diag_direction == 1: return not self.has_wall(r, c, N4) and not self.has_wall(r, c, E4)
+        elif diag_direction == 3: return not self.has_wall(r, c, S4) and not self.has_wall(r, c, E4)
+        elif diag_direction == 5: return not self.has_wall(r, c, S4) and not self.has_wall(r, c, W4)
+        elif diag_direction == 7: return not self.has_wall(r, c, N4) and not self.has_wall(r, c, W4)
         return False
     def get_wall_from_coords(self, click_x, click_y):
         min_dist_sq = (self.click_tolerance ** 2) + 1; closest_wall = None
@@ -484,6 +471,7 @@ class MazeEditor:
     def on_canvas_click(self, event):
         wall_info = self.get_wall_from_coords(event.x, event.y)
         if wall_info:
+            self.show_sim_results = False
             wall_type, r, c = wall_info; toggled = False
             try:
                 if wall_type == 'h': self.h_walls[r][c] = not self.h_walls[r][c]; toggled = True
@@ -494,49 +482,77 @@ class MazeEditor:
                 self.update_status(f"Wall {'H' if wall_type=='h' else 'V'}({r},{c}) toggled.")
                 self._update_window_title()
     def on_close_window(self):
+        if self.mouse_sim_running: self.mouse_sim_running = False
         if self._check_save_before_action("closing"): self.master.destroy()
 
-    # --- Drawing ---
     def draw_maze(self):
-        cell_size = self.cell_visual_size_px; gs = self.grid_size
+        cell_size = self.cell_visual_size_px
+        gs = self.grid_size
+        wall_thickness = self.scaled_wall_thickness
+        # <<< MODIFIED >>> Use the new scaled_post_size property
+        post_size = self.scaled_post_size
+
         if cell_size <= 0 or not gs: return
         self.canvas.delete("all")
         start_r, start_c = self.start_cell
         highlight_on = self.highlight_open_cells_var.get()
-        # Cells
+
+        # Draw cells
         for r in range(gs):
             for c in range(gs):
-                x0, y0 = self.cell_to_pixel(r, c); x1, y1 = x0 + cell_size, y0 + cell_size
-                fill_color = COLOR_BACKGROUND; is_goal = (r, c) in self.goal_cells
-                if (r,c) == (start_r, start_c): fill_color = COLOR_START
-                elif is_goal: fill_color = COLOR_GOAL
+                x0, y0 = self.cell_to_pixel(r, c)
+                x1, y1 = x0 + cell_size, y0 + cell_size
+                fill_color = COLOR_BACKGROUND
+                if (r, c) == (start_r, start_c): fill_color = COLOR_START
+                elif (r, c) in self.goal_cells: fill_color = COLOR_GOAL
                 elif highlight_on:
-                     if not self.has_wall(r, c, N4) and not self.has_wall(r, c, E4) and \
-                        not self.has_wall(r, c, S4) and not self.has_wall(r, c, W4):
-                         fill_color = COLOR_HIGHLIGHT_OPEN
+                    if not self.has_wall(r, c, N4) and not self.has_wall(r, c, E4) and \
+                       not self.has_wall(r, c, S4) and not self.has_wall(r, c, W4):
+                        fill_color = COLOR_HIGHLIGHT_OPEN
                 self.canvas.create_rectangle(x0, y0, x1, y1, fill=fill_color, outline=COLOR_GRID_LINE, tags="cell")
-        # Start Arrow
-        if start_r is not None and start_c is not None and start_r < gs: # Ensure start is valid for current size
+
+        # Draw start arrow
+        if start_r is not None and start_c is not None and start_r < gs:
             arrow_center_x, arrow_base_y = self.cell_center_to_pixel(start_r, start_c)
-            arrow_tip_y = arrow_base_y - cell_size * 0.4; arrow_width = max(1, int(cell_size * 0.15))
+            arrow_tip_y = arrow_base_y - cell_size * 0.4
+            arrow_width = max(1, int(cell_size * 0.15))
             self.canvas.create_line(arrow_center_x, arrow_base_y, arrow_center_x, arrow_tip_y, arrow=tk.LAST, fill="black", width=arrow_width, tags="start_arrow")
-        # Walls
+
+        # Draw walls
         for r_wall in range(gs + 1):
             for c_wall in range(gs):
                 if r_wall < len(self.h_walls) and c_wall < len(self.h_walls[0]) and self.h_walls[r_wall][c_wall]:
                     x0, y0 = self.cell_to_pixel(r_wall, c_wall); x1 = x0 + cell_size; y1 = y0
-                    self.canvas.create_line(x0, y0, x1, y1, fill=COLOR_WALL, width=WALL_THICKNESS, tags="wall")
+                    wall_color = COLOR_WALL
+                    if self.mouse_sim_running or self.show_sim_results:
+                        try:
+                            if self.mouse_seen_h_walls[r_wall][c_wall]: wall_color = COLOR_WALL_SEEN
+                        except IndexError: pass
+                    self.canvas.create_line(x0, y0, x1, y1, fill=wall_color, width=wall_thickness, tags="wall")
+
         for r_wall in range(gs):
             for c_wall in range(gs + 1):
                  if r_wall < len(self.v_walls) and c_wall < len(self.v_walls[0]) and self.v_walls[r_wall][c_wall]:
                     x0, y0 = self.cell_to_pixel(r_wall, c_wall); x1 = x0; y1 = y0 + cell_size
-                    self.canvas.create_line(x0, y0, x1, y1, fill=COLOR_WALL, width=WALL_THICKNESS, tags="wall")
-        # Posts
-        post_rad = POST_RADIUS
+                    wall_color = COLOR_WALL
+                    if self.mouse_sim_running or self.show_sim_results:
+                        try:
+                            if self.mouse_seen_v_walls[r_wall][c_wall]: wall_color = COLOR_WALL_SEEN
+                        except IndexError: pass
+                    self.canvas.create_line(x0, y0, x1, y1, fill=wall_color, width=wall_thickness, tags="wall")
+
+        # <<< MODIFIED >>> Draw square posts instead of ovals
+        # Draw posts
         for r_post in range(gs + 1):
             for c_post in range(gs + 1):
                 x_center, y_center = self.post_to_pixel(r_post, c_post)
-                self.canvas.create_oval(x_center-post_rad, y_center-post_rad, x_center+post_rad, y_center+post_rad, fill=COLOR_POST, outline=COLOR_POST, tags="post")
+                half_post = post_size / 2
+                self.canvas.create_rectangle(
+                    x_center - half_post, y_center - half_post,
+                    x_center + half_post, y_center + half_post,
+                    fill=COLOR_POST, outline=COLOR_POST, tags="post"
+                )
+
 
     def _calculate_path_distance(self, path):
         distance = 0.0
@@ -547,16 +563,18 @@ class MazeEditor:
             elif dr == 1 and dc == 1: distance += CELL_PHYSICAL_SIZE_M * SQRT2
         return distance
 
-    # --- Route Finding ---
     def find_and_draw_routes(self):
-        """Calculates all route types, vertices, updates labels, and triggers drawing."""
-        if not self.goal_cells: # Need at least one goal
-            self.clear_routes(); self.draw_maze() # Clear routes, draw maze
+        if self.mouse_sim_running:
+             self._draw_simulation_state()
+             return
+
+        if not self.goal_cells:
+            self.clear_routes(); self.draw_maze()
             self.msg_left="No goal"; self.msg_shortest="No goal"; self.msg_straightest="No goal"; self.msg_diagonal="No goal"; self.msg_smoothed="No goal"
         else:
             path_left, msg_left_base = self._calculate_left_hand_path()
             path_shortest, msg_shortest_base = self._calculate_dijkstra_path(TURN_PENALTY_SHORTEST)
-            current_turn_weight = self.turn_weight_var.get() # Assumes validated by trace callback
+            current_turn_weight = self.turn_weight_var.get()
             path_straightest, msg_straightest_base = self._calculate_dijkstra_path(current_turn_weight)
             path_diagonal, msg_diagonal_base = self._calculate_dijkstra_diag_path(TURN_PENALTY_DIAGONAL)
             self.straightest_path_pixel_vertices = self._calculate_pixel_vertices(path_straightest)
@@ -571,9 +589,8 @@ class MazeEditor:
             self.route_path_left = path_left; self.route_path_shortest = path_shortest
             self.route_path_straightest = path_straightest; self.route_path_diagonal = path_diagonal
 
-        self.draw_maze(); self.draw_current_routes() # Draw maze first, then routes
+        self.draw_maze(); self.draw_current_routes()
         w_text = f"(w={self.turn_weight_var.get():.1f})"
-        # Check if labels exist before configuring (robustness for initialization)
         if hasattr(self, 'key_label_left'): self.key_label_left.config(text=f"L: {self.msg_left}")
         if hasattr(self, 'key_label_shortest'): self.key_label_shortest.config(text=f"S: {self.msg_shortest}")
         if hasattr(self, 'key_label_straightest'): self.key_label_straightest.config(text=f"St {w_text}: {self.msg_straightest}")
@@ -582,7 +599,6 @@ class MazeEditor:
 
 
     def _calculate_pixel_vertices(self, path):
-        """Calculates the list of (x,y) pixel vertices for a given cell path."""
         if not path: return []
         vertices = []
         start_r, start_c = path[0]; start_x, start_y = self.cell_center_to_pixel(start_r, start_c)
@@ -599,9 +615,7 @@ class MazeEditor:
                     elif dr == 1:  move_dir4 = S4
                     elif dc == -1: move_dir4 = W4
                     elif dc == 1:  move_dir4 = E4
-                    if move_dir4 != -1:
-                        entry_dir4 = (move_dir4 + 2) % 4
-                        x2, y2 = self.wall_midpoint_to_pixel(r1, c1, entry_dir4)
+                    if move_dir4 != -1: entry_dir4 = (move_dir4 + 2) % 4; x2, y2 = self.wall_midpoint_to_pixel(r1, c1, entry_dir4)
                     else: x2, y2 = self.cell_center_to_pixel(r1, c1)
                 elif is_diag: x2, y2 = self.cell_center_to_pixel(r1, c1)
                 else: x2, y2 = self.cell_center_to_pixel(r1, c1)
@@ -653,8 +667,7 @@ class MazeEditor:
                     new_turns = turns + turn_inc; new_priority = new_cost + turn_weight * float(new_turns)
                     next_visited_key = (next_r, next_c, next_dir4)
                     if next_visited_key not in visited or new_priority < visited[next_visited_key]:
-                        new_path = path + [(next_r, next_c)]
-                        heapq.heappush(pq, (new_priority, new_cost, new_turns, next_r, next_c, next_dir4, new_path))
+                        new_path = path + [(next_r, next_c)]; heapq.heappush(pq, (new_priority, new_cost, new_turns, next_r, next_c, next_dir4, new_path))
         return [], "Unreachable"
 
     def _calculate_dijkstra_diag_path(self, turn_weight):
@@ -666,7 +679,7 @@ class MazeEditor:
             visited_key = (r, c, arr_dir8)
             if visited_key in visited and visited[visited_key] <= priority: continue
             visited[visited_key] = priority
-            for next_dir8 in range(8):
+            for next_dir8 in range(len(DR8)):
                 next_r, next_c = r + DR8[next_dir8], c + DC8[next_dir8]
                 if not (0 <= next_r < gs and 0 <= next_c < gs): continue
                 move_ok = (next_dir8 % 2 == 0 and not self.has_wall(r, c, next_dir8 // 2)) or \
@@ -677,32 +690,15 @@ class MazeEditor:
                     new_turns = turns + turn_inc; new_priority = new_cost + turn_weight * float(new_turns)
                     next_visited_key = (next_r, next_c, next_dir8)
                     if next_visited_key not in visited or new_priority < visited[next_visited_key]:
-                        new_path = path + [(next_r, next_c)]
-                        heapq.heappush(pq, (new_priority, new_cost, new_turns, next_r, next_c, next_dir8, new_path))
+                        new_path = path + [(next_r, next_c)]; heapq.heappush(pq, (new_priority, new_cost, new_turns, next_r, next_c, next_dir8, new_path))
         return [], "Unreachable"
 
-    # --- Drawing Routes (Decoupled Version with Scaled Smoothing) ---
     def draw_current_routes(self):
-        """Draws calculated routes based on visibility toggles and pre-calculated vertices."""
-        self.canvas.delete("route_left", "route_shortest", "route_straightest",
-                           "route_diagonal", "route_smoothed")
-        visibility_map = {
-            "route_left": self.show_route_left_var, "route_shortest": self.show_route_shortest_var,
-            "route_diagonal": self.show_route_diagonal_var, "route_straightest": self.show_route_straightest_var,
-            "route_smoothed": self.show_route_smoothed_var
-        }
-        line_options_sharp = {'width': ROUTE_WIDTH, 'capstyle': tk.BUTT}
-        line_options_shortest = {'width': ROUTE_WIDTH + 2, 'capstyle': tk.ROUND}
-        line_options_round = {'width': ROUTE_WIDTH, 'capstyle': tk.ROUND}
-        line_options_straightest = {'width': ROUTE_WIDTH, 'capstyle': tk.ROUND}
-        line_options_smoothed = {'width': ROUTE_WIDTH, 'capstyle': tk.ROUND, 'dash': (4, 4)}
-
-        # Draw Basic Paths (Left, Shortest, Diagonal)
-        paths_colors_tags_basic = [
-            (self.route_path_shortest, COLOR_ROUTE_SHORTEST, "route_shortest"),
-            (self.route_path_diagonal, COLOR_ROUTE_DIAGONAL, "route_diagonal"),
-            (self.route_path_left, COLOR_ROUTE_LEFT, "route_left"),
-        ]
+        self.canvas.delete("route_left", "route_shortest", "route_straightest", "route_diagonal", "route_smoothed")
+        if self.mouse_sim_running: return
+        visibility_map = { "route_left": self.show_route_left_var, "route_shortest": self.show_route_shortest_var, "route_diagonal": self.show_route_diagonal_var, "route_straightest": self.show_route_straightest_var, "route_smoothed": self.show_route_smoothed_var }
+        line_options_sharp = {'width': ROUTE_WIDTH, 'capstyle': tk.BUTT}; line_options_shortest = {'width': ROUTE_WIDTH + 2, 'capstyle': tk.ROUND}; line_options_round = {'width': ROUTE_WIDTH, 'capstyle': tk.ROUND}; line_options_straightest = {'width': ROUTE_WIDTH, 'capstyle': tk.ROUND}; line_options_smoothed = {'width': ROUTE_WIDTH, 'capstyle': tk.ROUND, 'dash': (4, 4)}
+        paths_colors_tags_basic = [(self.route_path_shortest, COLOR_ROUTE_SHORTEST, "route_shortest"), (self.route_path_diagonal, COLOR_ROUTE_DIAGONAL, "route_diagonal"), (self.route_path_left, COLOR_ROUTE_LEFT, "route_left")]
         for path, color, tag in paths_colors_tags_basic:
             visibility_var = visibility_map.get(tag)
             if not visibility_var or not visibility_var.get() or not path: continue
@@ -716,39 +712,23 @@ class MazeEditor:
                      current_line_options = line_options_shortest if tag == "route_shortest" else line_options_round
                      segment_points_flat = [coord for point in path_vertices for coord in point]
                      self.canvas.create_line(segment_points_flat, fill=color, tags=tag, **current_line_options)
-
-        # Draw Straightest Path (Orange Line) - Uses pre-calculated vertices
         if visibility_map["route_straightest"].get() and len(self.straightest_path_pixel_vertices) >= 2:
             straightest_points_flat = [coord for point in self.straightest_path_pixel_vertices for coord in point]
-            self.canvas.create_line(straightest_points_flat, fill=COLOR_ROUTE_STRAIGHTEST,
-                                    tags="route_straightest", **line_options_straightest)
-
-        # Draw Smoothed Path (Cyan Dashed Line) - Also uses pre-calculated vertices
+            self.canvas.create_line(straightest_points_flat, fill=COLOR_ROUTE_STRAIGHTEST, tags="route_straightest", **line_options_straightest)
         if SCIPY_AVAILABLE and visibility_map["route_smoothed"].get() and len(self.straightest_path_pixel_vertices) >= 4:
             try:
-                x_pts = [p[0] for p in self.straightest_path_pixel_vertices]
-                y_pts = [p[1] for p in self.straightest_path_pixel_vertices]
-                coords = np.array([x_pts, y_pts])
-                current_cell_size = float(self.cell_visual_size_px)
-                default_cell_size = float(DEFAULT_CELL_VISUAL_SIZE_PX)
-                adjusted_smoothing_factor = BASE_SMOOTHING_FACTOR
-                if default_cell_size > 1e-6 and current_cell_size > 1e-6:
-                    scale_factor_sq = (current_cell_size / default_cell_size) ** 2
-                    adjusted_smoothing_factor = BASE_SMOOTHING_FACTOR * scale_factor_sq
-                adjusted_smoothing_factor = max(0, adjusted_smoothing_factor)
-                tck, u = splprep(coords, s=adjusted_smoothing_factor, k=3, per=0)
-                num_smooth_points = max(50, len(self.straightest_path_pixel_vertices) * 5)
-                u_fine = np.linspace(u.min(), u.max(), num_smooth_points)
+                x_pts, y_pts = zip(*self.straightest_path_pixel_vertices); coords = np.array([x_pts, y_pts])
+                current_cell_size = float(self.cell_visual_size_px); default_cell_size = float(DEFAULT_CELL_VISUAL_SIZE_PX)
+                adj_s = BASE_SMOOTHING_FACTOR * (current_cell_size / default_cell_size)**2 if default_cell_size > 1e-6 else BASE_SMOOTHING_FACTOR
+                tck, u = splprep(coords, s=max(0, adj_s), k=3, per=0)
+                u_fine = np.linspace(u.min(), u.max(), max(50, len(x_pts) * 5))
                 x_smooth, y_smooth = splev(u_fine, tck)
-                smooth_points_flat = [coord for i in range(num_smooth_points) for coord in (x_smooth[i], y_smooth[i])]
-                if len(smooth_points_flat) >= 4:
-                    self.canvas.create_line(smooth_points_flat, fill=COLOR_ROUTE_SMOOTHED,
-                                            tags="route_smoothed", **line_options_smoothed)
-            except Exception as e:
-                print(f"Error generating smoothed route: {e}")
-                self.update_status("Error generating smoothed route.")
+                smooth_points_flat = [c for p in zip(x_smooth, y_smooth) for c in p]
+                if len(smooth_points_flat) >= 4: self.canvas.create_line(smooth_points_flat, fill=COLOR_ROUTE_SMOOTHED, tags="route_smoothed", **line_options_smoothed)
+            except Exception as e: print(f"Error smoothing route: {e}"); self.update_status("Error smoothing route.")
 
     # --- Maze Generation ---
+    # ... (This section is unchanged and correct from before) ...
     def _get_neighbours(self, r, c, visited):
         neighbours = []; gs = self.grid_size
         for direction4 in range(4):
@@ -822,22 +802,19 @@ class MazeEditor:
                     nr, nc = r + DR4[dir4], c + DC4[dir4]
                     if (0 <= nr < gs and 0 <= nc < gs and (nr, nc) not in visited): visited.add((nr, nc)); q.append((nr, nc))
         return False
-    # Removed _ensure_single_goal_entry
-
     def generate_maze(self):
-        """Generates a new maze applying rules and checks for the selected size."""
         if not self._check_save_before_action("generating new maze"): return
-        try: # Check selected size matches current size
+        try:
             target_size = int(self.selected_size_var.get())
             if target_size != self.grid_size:
                  if not self._check_save_before_action("changing size for generation"): self.selected_size_var.set(str(self.grid_size)); return
                  if not self._set_grid_size(target_size): return
         except ValueError: pass
 
+        self.show_sim_results = False
         gs = self.grid_size
         if not self.goal_cells:
             messagebox.showwarning("Generation Warning", "No goal cells defined.\nPlease Shift+Click to set goal(s) first.", parent=self.master); return
-
         max_attempts = 20 + (gs // 16 - 1) * 10
         for attempt in range(1, max_attempts + 1):
             self.update_status(f"Generating {gs}x{gs} maze (Attempt {attempt})..."); self.master.update()
@@ -883,6 +860,10 @@ class MazeEditor:
         if not self._check_save_before_action("loading"): return
         filename = filedialog.askopenfilename(filetypes=[("Text/Maze files", "*.txt *.maze"), ("All files", "*.*")], title="Load Maze File")
         if not filename: return
+
+        # <<< MODIFIED >>> Reset simulation result display on load
+        self.show_sim_results = False
+
         try:
             with open(filename, 'r') as f: lines = [line.rstrip() for line in f if line.strip()]
             detected_size = -1
@@ -925,17 +906,13 @@ class MazeEditor:
         if not self._check_save_before_action("loading from GitHub"): return
         self._show_download_selection_dialog() # Dialog handles fetching
 
-    # <<< Updated Method >>>
     def _show_download_selection_dialog(self):
         """Creates a Toplevel window to select maze size and file, including preview."""
         dialog = Toplevel(self.master); dialog.title("Load Maze from GitHub"); dialog.geometry("550x480"); dialog.transient(self.master); dialog.grab_set()
-        dialog_size_var = tk.StringVar(value=self.selected_size_var.get()) # Default to main window's selection
-        maze_files_dict = {} # Filename -> URL mapping for current size
-        # <<< Store the full list of names for the current size >>>
+        dialog_size_var = tk.StringVar(value=self.selected_size_var.get())
+        maze_files_dict = {}
         current_sorted_filenames = []
-        # --- Dialog State ---
         self.preview_canvas = None; self.preview_after_id = None; self.selected_maze_url = None
-        # --- GUI Layout (Frames, Search, Listbox, Preview, Buttons) ---
         main_frame = Frame(dialog); main_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
         main_frame.rowconfigure(2, weight=1); main_frame.columnconfigure(0, weight=1); main_frame.columnconfigure(1, weight=0)
         top_frame = Frame(main_frame); top_frame.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 10))
@@ -949,9 +926,8 @@ class MazeEditor:
         preview_frame = Frame(main_frame, bd=1, relief=tk.SUNKEN); preview_frame.grid(row=2, column=1, sticky="nsew", padx=(5, 0)); PREVIEW_SIZE = 180; self.preview_canvas = Canvas(preview_frame, width=PREVIEW_SIZE, height=PREVIEW_SIZE, bg="white", bd=0, highlightthickness=0); self.preview_canvas.pack(padx=2, pady=2);
         button_frame = Frame(main_frame); button_frame.grid(row=3, column=0, columnspan=2, pady=(10, 0)); Button(button_frame, text="Load Selected", command=lambda: on_load_confirm(listbox, maze_files_dict, dialog), width=12).pack(side=tk.LEFT, padx=10); Button(button_frame, text="Cancel", command=dialog.destroy, width=12).pack(side=tk.LEFT, padx=10)
 
-        # --- Helper Function to Fetch List and Update UI ---
         def _fetch_list_and_update_ui(parent_dialog, lb, size_var, files_dict_ref):
-            nonlocal current_sorted_filenames # Allow modification
+            nonlocal current_sorted_filenames
             lb.delete(0, END); files_dict_ref.clear(); search_var.set("")
             if self.preview_canvas: self.preview_canvas.delete("all")
             if self.preview_after_id: parent_dialog.after_cancel(self.preview_after_id); self.preview_after_id = None
@@ -964,12 +940,12 @@ class MazeEditor:
             try:
                 response = requests.get(api_url, timeout=15); response.raise_for_status(); data = response.json()
                 if not isinstance(data, list): raise ValueError("Invalid API response")
-                files_dict_ref.clear() # Ensure dict is clear before populating
+                files_dict_ref.clear()
                 for item in data:
                     if isinstance(item,dict) and item.get('type')=='file' and item.get('name','').lower().endswith((".txt",".maze")) and item.get('download_url'):
                          files_dict_ref[item['name']] = item['download_url']
-                current_sorted_filenames = sorted(files_dict_ref.keys(), key=str.lower) # Store full list
-                for name in current_sorted_filenames: lb.insert(END, name) # Populate listbox
+                current_sorted_filenames = sorted(files_dict_ref.keys(), key=str.lower)
+                for name in current_sorted_filenames: lb.insert(END, name)
                 if self.preview_canvas:
                      self.preview_canvas.delete("all")
                      msg = "Select a maze\nto preview" if files_dict_ref else f"No {size_str}x{size_str} mazes\nfound in repo."
@@ -981,45 +957,39 @@ class MazeEditor:
                       self.preview_canvas.delete("all"); self.preview_canvas.create_text(PREVIEW_SIZE/2, PREVIEW_SIZE/2, text=err_msg, justify=tk.CENTER, fill="red")
                  print(f"Error fetching GitHub list: {e}")
 
-        # --- Search/Filter Logic (Modified) ---
         def _update_listbox_filter(*args):
             search_term = search_var.get().lower().strip(); listbox.delete(0, END)
-            # <<< Filter using the stored full list >>>
-            for filename in current_sorted_filenames: # Iterate stored full list
-                if not search_term or search_term in filename.lower():
-                    listbox.insert(END, filename)
-            # Clear preview when list is filtered
-            if self.preview_canvas: self.preview_canvas.delete("all"); self.preview_canvas.create_text(PREVIEW_SIZE/2, PREVIEW_SIZE/2, text="(Filter active)", fill="grey") # Indicate filtering
+            for filename in current_sorted_filenames:
+                if not search_term or search_term in filename.lower(): listbox.insert(END, filename)
+            if self.preview_canvas: self.preview_canvas.delete("all"); self.preview_canvas.create_text(PREVIEW_SIZE/2, PREVIEW_SIZE/2, text="(Filter active)", fill="grey")
             if self.preview_after_id: dialog.after_cancel(self.preview_after_id); self.preview_after_id = None
             self.selected_maze_url = None
-        search_var.trace_add("write", _update_listbox_filter) # Filter existing list
+        search_var.trace_add("write", _update_listbox_filter)
 
-        # --- Preview Update Logic (from list selection)---
         def _fetch_and_draw_preview(filename, url):
             if not self.preview_canvas or not self.preview_canvas.winfo_exists(): return
             self.preview_canvas.delete("all"); self.preview_canvas.create_text(PREVIEW_SIZE/2, PREVIEW_SIZE/2, text=f"Loading\n{filename}...", justify=tk.CENTER, fill="blue"); self.preview_canvas.update_idletasks()
             try:
                 response = requests.get(url, timeout=10); response.raise_for_status()
                 content = response.text; lines = content.splitlines(); lines = [line.rstrip() for line in lines if line.strip()]
-                preview_grid_size = -1 # Detect size
+                preview_grid_size = -1
                 if len(lines)==2*16+1: preview_grid_size=16
                 elif len(lines)==2*32+1: preview_grid_size=32
                 else: raise ValueError(f"Invalid rows")
                 expected_cols = 4*preview_grid_size+1
                 if not lines or len(lines[0])<expected_cols: raise ValueError(f"Invalid cols")
                 gs = preview_grid_size
-                # Parse walls (using standard loops)
                 h_w=[[False for _ in range(gs)] for _ in range(gs+1)]; v_w=[[False for _ in range(gs+1)] for _ in range(gs)]
                 for r_idx, line in enumerate(lines):
-                    if r_idx%2==0: # H walls
+                    if r_idx%2==0:
                         r_wall = r_idx//2
                         if 0<=r_wall<=gs:
                             for c in range(gs): char_idx=c*4+2; h_w[r_wall][c]=(line[char_idx]=='-') if char_idx<len(line) else False
-                    else: # V walls
+                    else:
                         r_cell=(r_idx-1)//2
                         if 0<=r_cell<gs:
                             for c in range(gs+1): char_idx=c*4; v_w[r_cell][c]=(line[char_idx]=='|') if char_idx<len(line) else False
-                self._draw_maze_on_canvas(self.preview_canvas, h_w, v_w, PREVIEW_SIZE, grid_size_override=gs) # Pass size
+                self._draw_maze_on_canvas(self.preview_canvas, h_w, v_w, PREVIEW_SIZE, grid_size_override=gs)
             except (requests.exceptions.RequestException, ValueError, IndexError, Exception) as e:
                  if self.preview_canvas and self.preview_canvas.winfo_exists():
                      self.preview_canvas.delete("all"); err_msg = f"Preview Error:\n{type(e).__name__}"
@@ -1039,19 +1009,13 @@ class MazeEditor:
                 if self.preview_canvas: self.preview_canvas.delete("all"); self.preview_canvas.create_text(PREVIEW_SIZE/2, PREVIEW_SIZE/2, text="Error:\nURL missing?", fill="red")
                 self.selected_maze_url = None
         listbox.bind("<<ListboxSelect>>", _on_preview_selection)
-
-        # --- Load Confirmation Logic ---
         def on_load_confirm(lb, files_dict, dlg):
             idx = lb.curselection(); filename=lb.get(idx[0]) if idx else None; url=files_dict.get(filename) if filename else None
             if url: dlg.destroy(); self._download_and_load_selected_maze(filename, url)
             else: messagebox.showwarning("Select", "Please select a maze file.", parent=dlg)
         listbox.bind("<Double-1>", lambda e:on_load_confirm(listbox, maze_files_dict, dialog)); listbox.bind("<Return>", lambda e:on_load_confirm(listbox, maze_files_dict, dialog))
-
-        # --- Initial Fetch ---
-        _fetch_list_and_update_ui(dialog, listbox, dialog_size_var, maze_files_dict)
-
+        _fetch_list_and_update_ui(dialog, listbox, dialog_size_var, maze_files_dict) # Initial fetch
         search_entry.focus_set(); dialog.wait_window()
-
 
     def _draw_maze_on_canvas(self, target_canvas, h_walls, v_walls, target_size_px, grid_size_override=None):
         """Draws a simplified maze representation onto a given canvas."""
@@ -1077,10 +1041,10 @@ class MazeEditor:
         except IndexError: target_canvas.delete("all"); target_canvas.create_text(target_size_px/2, target_size_px/2, text="Preview Error:\nIndex Error", justify=tk.CENTER, fill="red")
         except Exception as e: target_canvas.delete("all"); target_canvas.create_text(target_size_px/2, target_size_px/2, text=f"Preview Error:\n{type(e).__name__}", justify=tk.CENTER, fill="red")
 
-
     def _download_and_load_selected_maze(self, filename, download_url):
         """Downloads the content, detects size, and loads it."""
         self.update_status(f"Downloading '{filename}'..."); self.master.update()
+        self.show_sim_results = False
         try:
             response = requests.get(download_url, timeout=15); response.raise_for_status(); content = response.text
             lines = content.splitlines(); lines = [line.rstrip() for line in lines if line.strip()]
@@ -1091,8 +1055,8 @@ class MazeEditor:
             expected_cols = 4*detected_size+1
             if not lines or len(lines[0])<expected_cols: raise ValueError(f"Invalid column count.")
             if self.grid_size != detected_size:
-                if not self._set_grid_size(detected_size): raise RuntimeError("Failed to set size.")
-            gs = self.grid_size
+                self.selected_size_var.set(str(detected_size))
+            gs = int(self.selected_size_var.get())
             new_h=[[False for _ in range(gs)] for _ in range(gs+1)]; new_v=[[False for _ in range(gs+1)] for _ in range(gs)]
             loaded_goal_cells = set()
             for r_idx, line in enumerate(lines):
@@ -1122,6 +1086,233 @@ class MazeEditor:
 
     def update_status(self, message):
         self.status_label.config(text=message)
+
+    # --- Mouse Simulation Methods ---
+    def start_mouse_simulation(self):
+        """Starts or stops the mouse simulation."""
+        if self.mouse_sim_running:
+            self.mouse_sim_running = False # Stop current simulation
+            if self.mouse_after_id:
+                self.master.after_cancel(self.mouse_after_id)
+                self.mouse_after_id = None
+            self.update_status("Mouse simulation stopped.")
+            # If we stop manually, don't keep the results, just revert to normal view
+            self.show_sim_results = False
+            self.find_and_draw_routes()
+            return
+
+        if not self.goal_cells:
+            messagebox.showwarning("Simulation Error", "No goal cells defined. Shift+Click to set goals.", parent=self.master)
+            return
+
+        self.mouse_sim_running = True
+        self.show_sim_results = False # Reset results display at the start
+        self.mouse_sim_phase = "EXPLORE"
+        self.mouse_run_count = 1
+        self.mouse_r, self.mouse_c = self.start_cell
+        self.mouse_dir4 = N4 # Start facing North
+        self.mouse_trail = [(self.mouse_r, self.mouse_c)]
+
+        gs = self.grid_size
+        self.mouse_seen_h_walls = [[False for _ in range(gs)] for _ in range(gs + 1)]
+        self.mouse_seen_v_walls = [[False for _ in range(gs + 1)] for _ in range(gs)]
+        for c_idx in range(gs): self.mouse_seen_h_walls[0][c_idx] = self.mouse_seen_h_walls[gs][c_idx] = True
+        for r_idx in range(gs): self.mouse_seen_v_walls[r_idx][0] = self.mouse_seen_v_walls[r_idx][gs] = True
+
+        self._update_seen_walls() # Reveal walls of start cell
+
+        self.update_status(f"Run {self.mouse_run_count} ({self.mouse_sim_phase}): Starting exploration...")
+        self.canvas.delete("route_left", "route_shortest", "route_straightest", "route_diagonal", "route_smoothed")
+        self._mouse_simulation_step() # Start the first step
+
+    def _mouse_simulation_step(self):
+        """Executes a single step of the mouse simulation, looping until the best path is found."""
+        if not self.mouse_sim_running: return
+
+        gs = self.grid_size
+        r, c, direction = self.mouse_r, self.mouse_c, self.mouse_dir4
+
+        self._update_seen_walls()
+
+        if self.mouse_sim_phase == "EXPLORE":
+            if (r, c) in self.goal_cells:
+                self.update_status(f"Run {self.mouse_run_count} ({self.mouse_sim_phase}): Goal reached! Returning to start...")
+                self.mouse_sim_phase = "RETURN_TO_START"
+                self.mouse_trail = [(r,c)] # Reset trail for the return trip
+            else:
+                flood_map = self._run_flood_fill_on_seen_maze()
+                current_flood_val = flood_map[r][c]
+                if current_flood_val == float('inf'):
+                    self.update_status("Mouse is trapped! Stopping simulation."); self.mouse_sim_running = False; self.draw_maze(); return
+                options = [] # (flood_value, turn_priority, next_r, next_c, next_dir4)
+                for move_dir in range(4):
+                    if not self._mouse_has_wall_in_sim(r, c, move_dir):
+                        nr, nc = r + DR4[move_dir], c + DC4[move_dir]
+                        if 0 <= nr < gs and 0 <= nc < gs and flood_map[nr][nc] < current_flood_val:
+                            turn_diff = abs(direction - move_dir)
+                            if turn_diff == 0: turn_prio = 0 # Straight
+                            elif turn_diff == 2: turn_prio = 2 # Turn around
+                            else: turn_prio = 1 # Left/Right turn
+                            options.append((flood_map[nr][nc], turn_prio, nr, nc, move_dir))
+                if options:
+                    options.sort()
+                    _, _, next_r, next_c, next_dir = options[0]
+                    self.mouse_r, self.mouse_c, self.mouse_dir4 = next_r, next_c, next_dir
+                    self.mouse_trail.append((self.mouse_r, self.mouse_c))
+                else:
+                    self.mouse_sim_running = False; self.update_status("Mouse trapped in unhandled local minimum. Stopping."); self.draw_maze(); return
+
+        elif self.mouse_sim_phase == "RETURN_TO_START":
+            if (r, c) == self.start_cell: # We have arrived
+                self.mouse_run_count += 1
+                self.update_status(f"Run {self.mouse_run_count} (SPEED_RUN): Preparing for speed run...")
+                self.mouse_sim_phase = "SPEED_RUN"
+                self.mouse_trail = [(r,c)] # Reset trail for speed run
+                self.mouse_walls_seen_count = self._count_seen_walls() # Snapshot knowledge
+            else:
+                path_to_start, _ = self._calculate_dijkstra_on_seen_maze((r,c), self.start_cell, 0.0)
+                if not path_to_start or len(path_to_start) < 2:
+                    self.update_status("Error: Lost! Cannot find path back to start! Re-exploring."); self.mouse_sim_phase = "EXPLORE"; return
+                next_r, next_c = path_to_start[1]
+                dr, dc = next_r - r, next_c - c
+                for i in range(4):
+                    if DR4[i] == dr and DC4[i] == dc: self.mouse_dir4 = i; break
+                self.mouse_r, self.mouse_c = next_r, next_c
+                self.mouse_trail.append((self.mouse_r, self.mouse_c))
+
+        elif self.mouse_sim_phase == "SPEED_RUN":
+            if (r, c) in self.goal_cells:
+                new_wall_count = self._count_seen_walls()
+                if new_wall_count == self.mouse_walls_seen_count:
+                    # <<< MODIFIED >>> On successful completion, set flags and redraw.
+                    self.update_status(f"Run {self.mouse_run_count} Complete. Best route found! Path length: {len(self.mouse_trail)-1}")
+                    self.mouse_sim_running = False
+                    self.show_sim_results = True # Keep results visible
+                    self.draw_maze() # Final redraw with results
+                    # Re-draw final path on top
+                    self.canvas.create_line([coord for r_cell, c_cell in self.mouse_trail for coord in self.cell_center_to_pixel(r_cell, c_cell)], fill="cyan", width=ROUTE_WIDTH, tags="mouse_trail")
+                    return # Stop the .after() loop
+                else:
+                    self.update_status(f"Run {self.mouse_run_count} (SPEED_RUN): New walls found. Returning to start...")
+                    self.mouse_sim_phase = "RETURN_TO_START"
+                    self.mouse_trail = [(r,c)]
+            else:
+                path_to_goal, _ = self._calculate_dijkstra_on_seen_maze((r,c), self.goal_cells, self.turn_weight_var.get())
+                if not path_to_goal or len(path_to_goal) < 2:
+                    self.update_status(f"Run {self.mouse_run_count} (SPEED_RUN): Path blocked! Re-exploring..."); self.mouse_sim_phase = "EXPLORE"; return
+                next_r, next_c = path_to_goal[1]
+                dr, dc = next_r - r, next_c - c
+                for i in range(4):
+                    if DR4[i] == dr and DC4[i] == dc: self.mouse_dir4 = i; break
+                self.mouse_r, self.mouse_c = next_r, next_c
+                self.mouse_trail.append((self.mouse_r, self.mouse_c))
+
+        self._draw_simulation_state()
+        if self.mouse_sim_running:
+            self.mouse_after_id = self.master.after(10, self._mouse_simulation_step)
+
+    def _update_seen_walls(self):
+        """Updates the mouse's knowledge of walls in its current cell."""
+        r, c = self.mouse_r, self.mouse_c; gs = self.grid_size
+        if not (0 <= r < gs and 0 <= c < gs): return
+        self.mouse_seen_h_walls[r][c] = self.h_walls[r][c]
+        self.mouse_seen_v_walls[r][c+1] = self.v_walls[r][c+1]
+        self.mouse_seen_h_walls[r+1][c] = self.h_walls[r+1][c]
+        self.mouse_seen_v_walls[r][c] = self.v_walls[r][c]
+
+    def _mouse_has_wall_in_sim(self, r, c, direction4):
+        """Checks if the mouse *thinks* a wall exists from its seen_walls map."""
+        gs = self.grid_size
+        if not (0 <= r < gs and 0 <= c < gs): return True
+        try:
+            if direction4 == N4: return self.mouse_seen_h_walls[r][c]
+            elif direction4 == E4: return self.mouse_seen_v_walls[r][c+1]
+            elif direction4 == S4: return self.mouse_seen_h_walls[r+1][c]
+            elif direction4 == W4: return self.mouse_seen_v_walls[r][c]
+        except IndexError: return True
+        return True
+
+    def _run_flood_fill_on_seen_maze(self):
+        """
+        Runs Flood Fill (BFS) from the goal cells on the mouse's known map.
+        Returns a 2D array of distances from the goal.
+        """
+        gs = self.grid_size
+        flood_map = np.full((gs, gs), float('inf'))
+        q = deque()
+        for r_goal, c_goal in self.goal_cells:
+            if 0 <= r_goal < gs and 0 <= c_goal < gs:
+                flood_map[r_goal][c_goal] = 0
+                q.append((r_goal, c_goal))
+        while q:
+            r, c = q.popleft()
+            current_dist = flood_map[r][c]
+            for dir4 in range(4): # Check neighbors
+                if not self._mouse_has_wall_in_sim(r, c, dir4):
+                    nr, nc = r + DR4[dir4], c + DC4[dir4]
+                    if 0 <= nr < gs and 0 <= nc < gs and flood_map[nr][nc] == float('inf'):
+                        flood_map[nr][nc] = current_dist + 1
+                        q.append((nr, nc))
+        return flood_map
+
+    def _count_seen_walls(self):
+        """Counts the number of walls the mouse has discovered."""
+        h_count = sum(row.count(True) for row in self.mouse_seen_h_walls)
+        v_count = sum(row.count(True) for row in self.mouse_seen_v_walls)
+        return h_count + v_count
+
+    def _calculate_dijkstra_on_seen_maze(self, start_node_tuple, target_nodes, turn_weight):
+        """Calculates Dijkstra path using the mouse's *seen* walls."""
+        gs = self.grid_size
+        if isinstance(target_nodes, tuple): target_goals = {target_nodes}
+        else: target_goals = target_nodes
+
+        if start_node_tuple in target_goals:
+            return [start_node_tuple], "Already at target"
+
+        pq = [(0.0, 0.0, 0, start_node_tuple[0], start_node_tuple[1], N4, [start_node_tuple])]
+        visited = {}
+        while pq:
+            priority, cost, turns, r, c, arr_dir, path = heapq.heappop(pq)
+            if (r, c) in target_goals: return path, f"Target ({cost:.0f}c, {turns}t)"
+            visited_key = (r, c, arr_dir)
+            if visited_key in visited and visited[visited_key] <= priority: continue
+            visited[visited_key] = priority
+            for next_dir4 in range(4):
+                if not self._mouse_has_wall_in_sim(r, c, next_dir4):
+                    next_r, next_c = r + DR4[next_dir4], c + DC4[next_dir4]
+                    if not (0 <= next_r < gs and 0 <= next_c < gs): continue
+                    new_cost = cost + 1.0; turn_inc = 1 if arr_dir is not None and next_dir4 != arr_dir else 0
+                    new_turns = turns + turn_inc; new_priority = new_cost + turn_weight * float(new_turns)
+                    next_visited_key = (next_r, next_c, next_dir4)
+                    if next_visited_key not in visited or new_priority < visited[next_visited_key]:
+                        new_path = path + [(next_r, next_c)]
+                        heapq.heappush(pq, (new_priority, new_cost, new_turns, next_r, next_c, next_dir4, new_path))
+        return [], "Unreachable (Seen Maze)"
+
+    def _draw_simulation_state(self):
+        """Draws the maze and the current state of the mouse simulation."""
+        self.draw_maze() # Redraw base maze, which will now handle wall colors
+        if len(self.mouse_trail) >= 2:
+            trail_coords = [coord for r_cell, c_cell in self.mouse_trail for coord in self.cell_center_to_pixel(r_cell, c_cell)]
+            # Use different colors for different phases
+            trail_color = "magenta" # Default for return/speed run
+            if self.mouse_sim_phase == "EXPLORE":
+                trail_color = "#800080" # Darker purple for exploration
+            elif self.mouse_sim_phase == "SPEED_RUN":
+                trail_color = "cyan"
+            self.canvas.create_line(trail_coords, fill=trail_color, width=ROUTE_WIDTH, tags="mouse_trail")
+
+        mr, mc, mdir = self.mouse_r, self.mouse_c, self.mouse_dir4
+        mx, my = self.cell_center_to_pixel(mr, mc)
+        cs = self.cell_visual_size_px * 0.3 # Mouse size
+        if mdir == N4: points = [mx, my - cs*0.6, mx - cs*0.5, my + cs*0.3, mx + cs*0.5, my + cs*0.3]
+        elif mdir == E4: points = [mx + cs*0.6, my, mx - cs*0.3, my - cs*0.5, mx - cs*0.3, my + cs*0.5]
+        elif mdir == S4: points = [mx, my + cs*0.6, mx + cs*0.5, my - cs*0.3, mx - cs*0.5, my - cs*0.3]
+        else: # W4
+            points = [mx - cs*0.6, my, mx + cs*0.3, my + cs*0.5, mx + cs*0.3, my - cs*0.5]
+        self.canvas.create_polygon(points, fill="orange", outline="black", tags="mouse_sim_indicator")
+        self.master.update_idletasks() # Force canvas update
 
 # --- Main Execution ---
 if __name__ == "__main__":
