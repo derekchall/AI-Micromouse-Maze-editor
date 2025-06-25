@@ -38,7 +38,7 @@ POST_PHYSICAL_SIZE_M = 0.014      # 14 mm for post side length
 COLOR_BACKGROUND = "white"; COLOR_POST = "black"; COLOR_WALL = "blue"
 COLOR_WALL_SEEN = "red"
 COLOR_START = "lightgreen"; COLOR_GOAL = "lightblue"; COLOR_GRID_LINE = "#eee"
-COLOR_ROUTE_LEFT = "red"; COLOR_ROUTE_SHORTEST = "purple"
+COLOR_ROUTE_LEFT = "gray"; COLOR_ROUTE_SHORTEST = "purple"
 COLOR_ROUTE_STRAIGHTEST = "darkorange"; COLOR_ROUTE_DIAGONAL = "forest green"
 COLOR_ROUTE_SMOOTHED = "cyan"
 COLOR_KEY_SWATCH_BORDER = "#555"
