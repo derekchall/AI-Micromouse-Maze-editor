@@ -567,17 +567,32 @@ class MazeEditor:
                         fill_color = COLOR_HIGHLIGHT_OPEN
                 self.canvas.create_rectangle(x0, y0, x1, y1, fill=fill_color, outline=COLOR_GRID_LINE, tags="cell")
 
-        if self.show_flood_fill_var.get() and self.goal_cells:
+        # --- Context-aware weight drawing ---
+        if self.show_flood_fill_var.get():
             turn_weight = self.turn_weight_var.get()
-            cost_map = self._calculate_dijkstra_for_weights(turn_weight)
-            for r in range(gs):
-                for c in range(gs):
-                    cost_val = cost_map[r][c]
-                    if cost_val != float('inf'):
-                        x_center, y_center = self.cell_center_to_pixel(r, c)
-                        font_size = max(6, int(self.cell_visual_size_px / 3))
-                        self.canvas.create_text(x_center, y_center, text=f"{cost_val:.0f}",
-                                                font=("Arial", font_size), fill=COLOR_POST, tags="flood_fill_text")
+            cost_map = None 
+            is_sim_active = self.mouse_sim_running or self.sim_paused
+            
+            if is_sim_active:
+                # During simulation, the target changes
+                if self.mouse_sim_phase == "RETURN_TO_START":
+                    target_cells = {self.start_cell}
+                else: # EXPLORE, SPEED_RUN, or finished
+                    target_cells = self.goal_cells
+                cost_map = self._calculate_dijkstra_for_sim_weights(turn_weight, target_cells)
+            elif self.goal_cells:
+                # In editor mode, target is always the goal cells
+                cost_map = self._calculate_dijkstra_for_weights(turn_weight)
+            
+            if cost_map is not None:
+                for r in range(gs):
+                    for c in range(gs):
+                        cost_val = cost_map[r][c]
+                        if cost_val != float('inf'):
+                            x_center, y_center = self.cell_center_to_pixel(r, c)
+                            font_size = max(6, int(self.cell_visual_size_px / 3))
+                            self.canvas.create_text(x_center, y_center, text=f"{cost_val:.0f}",
+                                                    font=("Arial", font_size), fill=COLOR_POST, tags="flood_fill_text")
 
         # Draw start arrow
         if start_r is not None and start_c is not None and start_r < gs:
@@ -587,12 +602,13 @@ class MazeEditor:
             self.canvas.create_line(arrow_center_x, arrow_base_y, arrow_center_x, arrow_tip_y, arrow=tk.LAST, fill="black", width=arrow_width, tags="start_arrow")
 
         # Draw walls
+        is_sim_active = self.mouse_sim_running or self.sim_paused or self.show_sim_results
         for r_wall in range(gs + 1):
             for c_wall in range(gs):
                 if r_wall < len(self.h_walls) and c_wall < len(self.h_walls[0]) and self.h_walls[r_wall][c_wall]:
                     x0, y0 = self.cell_to_pixel(r_wall, c_wall); x1 = x0 + cell_size; y1 = y0
                     wall_color = COLOR_WALL
-                    if self.mouse_sim_running or self.show_sim_results:
+                    if is_sim_active:
                         try:
                             if self.mouse_seen_h_walls[r_wall][c_wall]: wall_color = COLOR_WALL_SEEN
                         except IndexError: pass
@@ -603,7 +619,7 @@ class MazeEditor:
                  if r_wall < len(self.v_walls) and c_wall < len(self.v_walls[0]) and self.v_walls[r_wall][c_wall]:
                     x0, y0 = self.cell_to_pixel(r_wall, c_wall); x1 = x0; y1 = y0 + cell_size
                     wall_color = COLOR_WALL
-                    if self.mouse_sim_running or self.show_sim_results:
+                    if is_sim_active:
                         try:
                             if self.mouse_seen_v_walls[r_wall][c_wall]: wall_color = COLOR_WALL_SEEN
                         except IndexError: pass
@@ -1415,16 +1431,20 @@ class MazeEditor:
         self.mouse_seen_v_walls[r][c+1] = self.v_walls[r][c+1]
         self.mouse_seen_h_walls[r+1][c] = self.h_walls[r+1][c]
         self.mouse_seen_v_walls[r][c] = self.v_walls[r][c]
+
     def _mouse_has_wall_in_sim(self, r, c, direction4):
+        """Checks for walls based on the mouse's limited knowledge."""
         gs = self.grid_size
         if not (0 <= r < gs and 0 <= c < gs): return True
         try:
-            if direction4 == N4: return self.mouse_seen_h_walls[r][c]
+            if direction4 == N4:   return self.mouse_seen_h_walls[r][c]
             elif direction4 == E4: return self.mouse_seen_v_walls[r][c+1]
             elif direction4 == S4: return self.mouse_seen_h_walls[r+1][c]
-            elif direction4 == W4: return self.v_walls[r][c]
-        except IndexError: return True
-        return True
+            elif direction4 == W4: return self.mouse_seen_v_walls[r][c]
+        except IndexError: 
+            return True # Out of bounds is like a wall
+        return True # Fallback
+
     def _run_flood_fill_on_seen_maze(self):
         gs = self.grid_size
         flood_map = np.full((gs, gs), float('inf'))
@@ -1445,11 +1465,7 @@ class MazeEditor:
         return flood_map
 
     def _calculate_dijkstra_for_weights(self, turn_weight):
-        """
-        Runs Dijkstra's from the goal cells on the true maze map to find the
-        minimum cost to reach every cell. This is for visualization.
-        Returns a 2D numpy array of costs.
-        """
+        """Calculates costs based on the TRUE maze for the editor view."""
         gs = self.grid_size
         cost_map = np.full((gs, gs), float('inf'))
         pq = []
@@ -1472,23 +1488,57 @@ class MazeEditor:
                     next_r, next_c = r + DR4[next_dir4], c + DC4[next_dir4]
                     if not (0 <= next_r < gs and 0 <= next_c < gs):
                         continue
-
                     new_cost = cost + 1.0
                     if next_dir4 != arr_dir:
                         new_cost += turn_weight
-                    
                     cost_map[next_r][next_c] = min(cost_map[next_r][next_c], new_cost)
-                    
                     if new_cost < visited.get((next_r, next_c, next_dir4), float('inf')):
                          visited[(next_r, next_c, next_dir4)] = new_cost
                          heapq.heappush(pq, (new_cost, next_r, next_c, next_dir4))
+        return cost_map
 
+    def _calculate_dijkstra_for_sim_weights(self, turn_weight, target_cells):
+        """
+        Calculates costs based on the MOUSE'S KNOWLEDGE for the simulation view,
+        using a dynamic target (either goal or start).
+        """
+        if not target_cells: return None
+        gs = self.grid_size
+        cost_map = np.full((gs, gs), float('inf'))
+        pq = []
+        visited = {} 
+
+        for r_target, c_target in target_cells:
+            if 0 <= r_target < gs and 0 <= c_target < gs:
+                cost_map[r_target][c_target] = 0
+                for direction in range(4):
+                    heapq.heappush(pq, (0.0, r_target, c_target, direction))
+                    visited[(r_target, c_target, direction)] = 0
+
+        while pq:
+            cost, r, c, arr_dir = heapq.heappop(pq)
+            if cost > cost_map[r][c]:
+                continue
+            
+            for next_dir4 in range(4):
+                if not self._mouse_has_wall_in_sim(r, c, next_dir4):
+                    next_r, next_c = r + DR4[next_dir4], c + DC4[next_dir4]
+                    if not (0 <= next_r < gs and 0 <= next_c < gs):
+                        continue
+                    new_cost = cost + 1.0
+                    if next_dir4 != arr_dir:
+                        new_cost += turn_weight
+                    cost_map[next_r][next_c] = min(cost_map[next_r][next_c], new_cost)
+                    if new_cost < visited.get((next_r, next_c, next_dir4), float('inf')):
+                         visited[(next_r, next_c, next_dir4)] = new_cost
+                         heapq.heappush(pq, (new_cost, next_r, next_c, next_dir4))
         return cost_map
 
     def _count_seen_walls(self):
         h_count = sum(row.count(True) for row in self.mouse_seen_h_walls)
         v_count = sum(row.count(True) for row in self.mouse_seen_v_walls)
         return h_count + v_count
+
     def _calculate_dijkstra_on_seen_maze(self, start_node_tuple, target_nodes, turn_weight):
         gs = self.grid_size
         if isinstance(target_nodes, tuple): target_goals = {target_nodes}
