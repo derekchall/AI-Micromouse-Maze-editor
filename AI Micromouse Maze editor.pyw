@@ -10,7 +10,7 @@ import time
 import requests # For downloading
 import os       # For folder creation and path manipulation
 
-# <<< ADDED >>> Import numpy and scipy for smoothing
+# Import numpy and scipy for smoothing
 import numpy as np
 try:
     from scipy.interpolate import splprep, splev
@@ -31,7 +31,6 @@ BASE_SMOOTHING_FACTOR = 1500 # Base smoothing factor at default cell size
 # Physical dimensions for scaling
 CELL_PHYSICAL_SIZE_M = 0.180      # 180 mm per cell
 WALL_PHYSICAL_THICKNESS_M = 0.012 # 12 mm for wall thickness
-# <<< MODIFIED >>> Added a specific size for posts
 POST_PHYSICAL_SIZE_M = 0.014      # 14 mm for post side length
 
 # Colors
@@ -92,6 +91,7 @@ class MazeEditor:
         self.show_route_diagonal_var = tk.BooleanVar(value=False)
         self.show_route_smoothed_var = tk.BooleanVar(value=True) # Cyan line
         self.highlight_open_cells_var = tk.BooleanVar(value=False)
+        self.show_flood_fill_var = tk.BooleanVar(value=False)
 
         self.selected_size_var = tk.StringVar(value=str(initial_size))
         self.selected_size_var.trace_add("write", self.on_size_select_change)
@@ -104,6 +104,9 @@ class MazeEditor:
 
         # --- Mouse Simulation State ---
         self.mouse_sim_running = False
+        self.sim_paused = False
+        self.sim_history = []
+        self.sim_history_index = -1
         self.show_sim_results = False
         self.mouse_sim_phase = None # "EXPLORE", "RETURN_TO_START", "SPEED_RUN"
         self.mouse_r, self.mouse_c = 0, 0
@@ -126,7 +129,8 @@ class MazeEditor:
 
         # Bindings
         self.canvas.bind("<Button-1>", self.on_canvas_click)
-        self.canvas.bind("<Shift-Button-1>", self.on_goal_set_click) # Goal Setting
+        self.canvas.bind("<Shift-Button-1>", self.on_goal_set_click)
+        self.canvas.bind("<Control-Button-1>", self.on_start_set_click)
         self.master.bind("<Configure>", self.schedule_resize)
         self.master.protocol("WM_DELETE_WINDOW", self.on_close_window)
 
@@ -136,7 +140,6 @@ class MazeEditor:
         # --- Schedule the initial resize/draw slightly after mainloop starts ---
         self.master.after(10, lambda: self.handle_resize(self.master.winfo_width(), self.master.winfo_height()))
 
-    # <<< MODIFIED >>> Replaced radius property with a size property for square posts
     @property
     def scaled_wall_thickness(self):
         """Calculates wall thickness in pixels based on physical size ratio."""
@@ -175,7 +178,6 @@ class MazeEditor:
             new_size = int(self.selected_size_var.get())
             if new_size != self.grid_size:
                  if self._set_grid_size(new_size): # Try to set the logical size
-                      # <<< ADDED: Force visual resize calculation AFTER successful size change >>>
                       self.master.update_idletasks() # Ensure window is updated
                       self.handle_resize(self.master.winfo_width(), self.master.winfo_height())
                  else:
@@ -202,7 +204,37 @@ class MazeEditor:
         else:
             self.goal_cells.add(cell); self.update_status(f"Goal cell added: ({r},{c})"); modified = True
         if modified:
+            self.show_sim_results = False # Old sim results are now invalid
             self.maze_modified = True; self._update_window_title(); self.find_and_draw_routes()
+
+    def on_start_set_click(self, event):
+        """Handles Control+Click to move the start cell."""
+        r, c = self.pixel_to_cell(event.x, event.y)
+
+        # Validate click is inside grid
+        if not (0 <= r < self.grid_size and 0 <= c < self.grid_size):
+            return
+        # Do nothing if clicking the same cell
+        if (r, c) == self.start_cell:
+            return
+        # Prevent setting start on a goal cell
+        if (r, c) in self.goal_cells:
+            self.update_status("Cannot set start on a goal cell.")
+            return
+
+        # Update the start cell
+        self.start_cell = (r, c)
+        self.start_pos_lh = (r, c, N4) # Default new start to face North
+
+        # Update maze state
+        self.maze_modified = True
+        self.show_sim_results = False # Old simulation results are now invalid
+
+        # Update GUI and recalculate everything
+        self.update_status(f"Start cell moved to ({r}, {c}).")
+        self._update_window_title()
+        self.find_and_draw_routes()
+
 
     # --- Core Logic ---
     def _set_grid_size(self, new_size, is_initial=False):
@@ -260,16 +292,42 @@ class MazeEditor:
         Button(left_ctrl_frame, text="Save Maze", command=self.save_maze_text).pack(side=tk.LEFT, padx=5)
         Button(left_ctrl_frame, text="Load Maze", command=self.load_maze_text).pack(side=tk.LEFT, padx=5)
         Button(left_ctrl_frame, text="Load from GitHub", command=self.fetch_github_maze_list).pack(side=tk.LEFT, padx=5)
-        Button(left_ctrl_frame, text="Simulate Mouse", command=self.start_mouse_simulation).pack(side=tk.LEFT, padx=10)
+
+        # --- Simulation Controls ---
+        # This button is swapped out for the control frame during simulation
+        self.simulate_button = Button(left_ctrl_frame, text="Simulate Mouse", command=self.start_mouse_simulation)
+        self.simulate_button.pack(side=tk.LEFT, padx=10)
+
+        # The frame for interactive simulation controls (initially hidden)
+        self.sim_controls_frame = Frame(left_ctrl_frame)
+
+        self.sim_stop_button = Button(self.sim_controls_frame, text="Stop", command=self.stop_mouse_simulation)
+        self.sim_stop_button.pack(side=tk.LEFT, padx=(10, 0))
+
+        self.sim_back_button = Button(self.sim_controls_frame, text="⏪", command=self._sim_step_backward)
+        self.sim_back_button.pack(side=tk.LEFT, padx=(5,0))
+
+        self.sim_pause_button = Button(self.sim_controls_frame, text="⏸", command=self._toggle_sim_pause)
+        self.sim_pause_button.pack(side=tk.LEFT)
+
+        self.sim_forward_button = Button(self.sim_controls_frame, text="⏩", command=self._sim_step_forward)
+        self.sim_forward_button.pack(side=tk.LEFT)
+        # --- End Simulation Controls ---
+
         right_controls_frame = Frame(top_control_frame); right_controls_frame.pack(side=tk.RIGHT, padx=10)
+
         weight_frame = Frame(right_controls_frame); weight_frame.pack(side=tk.LEFT, padx=5)
         Label(weight_frame, text="Turn W:").pack(side=tk.LEFT)
         vcmd_turn = (self.master.register(self.validate_float_entry), '%P')
         self.turn_weight_entry = Entry(weight_frame, textvariable=self.turn_weight_var, width=5, validate='key', validatecommand=vcmd_turn)
         self.turn_weight_entry.pack(side=tk.LEFT, padx=(2, 0))
-        highlight_frame = Frame(right_controls_frame); highlight_frame.pack(side=tk.LEFT, padx=5)
-        self.highlight_checkbutton = tk.Checkbutton(highlight_frame, text="Highlight Open", variable=self.highlight_open_cells_var, command=self.find_and_draw_routes)
-        self.highlight_checkbutton.pack(side=tk.LEFT)
+
+        view_options_frame = Frame(right_controls_frame); view_options_frame.pack(side=tk.LEFT, padx=5)
+        self.highlight_checkbutton = tk.Checkbutton(view_options_frame, text="Highlight Open", variable=self.highlight_open_cells_var, command=self.find_and_draw_routes)
+        self.highlight_checkbutton.pack(side=tk.TOP, anchor='w')
+        self.show_weights_checkbutton = tk.Checkbutton(view_options_frame, text="Show Weights", variable=self.show_flood_fill_var, command=self.find_and_draw_routes)
+        self.show_weights_checkbutton.pack(side=tk.TOP, anchor='w')
+
         initial_canvas_width = 2*MARGIN+DEFAULT_GRID_SIZE*DEFAULT_CELL_VISUAL_SIZE_PX
         initial_canvas_height = 2*MARGIN+DEFAULT_GRID_SIZE*DEFAULT_CELL_VISUAL_SIZE_PX
         self.canvas = Canvas(self.master, width=initial_canvas_width, height=initial_canvas_height, bg=COLOR_BACKGROUND)
@@ -294,7 +352,6 @@ class MazeEditor:
         self.key_label_diagonal = create_key_entry(self.key_frame, 3, COLOR_ROUTE_DIAGONAL, self.show_route_diagonal_var)
         self.key_label_smoothed = create_key_entry(self.key_frame, 4, COLOR_ROUTE_SMOOTHED, self.show_route_smoothed_var)
 
-    # <<< FUNCTION RE-ADDED >>>
     def validate_float_entry(self, P):
         """Validation function for float Entry widgets."""
         if P == "" or P == "." or P == "-": return True
@@ -489,7 +546,6 @@ class MazeEditor:
         cell_size = self.cell_visual_size_px
         gs = self.grid_size
         wall_thickness = self.scaled_wall_thickness
-        # <<< MODIFIED >>> Use the new scaled_post_size property
         post_size = self.scaled_post_size
 
         if cell_size <= 0 or not gs: return
@@ -510,6 +566,18 @@ class MazeEditor:
                        not self.has_wall(r, c, S4) and not self.has_wall(r, c, W4):
                         fill_color = COLOR_HIGHLIGHT_OPEN
                 self.canvas.create_rectangle(x0, y0, x1, y1, fill=fill_color, outline=COLOR_GRID_LINE, tags="cell")
+
+        if self.show_flood_fill_var.get() and self.goal_cells:
+            turn_weight = self.turn_weight_var.get()
+            cost_map = self._calculate_dijkstra_for_weights(turn_weight)
+            for r in range(gs):
+                for c in range(gs):
+                    cost_val = cost_map[r][c]
+                    if cost_val != float('inf'):
+                        x_center, y_center = self.cell_center_to_pixel(r, c)
+                        font_size = max(6, int(self.cell_visual_size_px / 3))
+                        self.canvas.create_text(x_center, y_center, text=f"{cost_val:.0f}",
+                                                font=("Arial", font_size), fill=COLOR_POST, tags="flood_fill_text")
 
         # Draw start arrow
         if start_r is not None and start_c is not None and start_r < gs:
@@ -541,8 +609,7 @@ class MazeEditor:
                         except IndexError: pass
                     self.canvas.create_line(x0, y0, x1, y1, fill=wall_color, width=wall_thickness, tags="wall")
 
-        # <<< MODIFIED >>> Draw square posts instead of ovals
-        # Draw posts
+        # Draw square posts
         for r_post in range(gs + 1):
             for c_post in range(gs + 1):
                 x_center, y_center = self.post_to_pixel(r_post, c_post)
@@ -564,7 +631,7 @@ class MazeEditor:
         return distance
 
     def find_and_draw_routes(self):
-        if self.mouse_sim_running:
+        if self.mouse_sim_running or self.sim_paused:
              self._draw_simulation_state()
              return
 
@@ -695,7 +762,7 @@ class MazeEditor:
 
     def draw_current_routes(self):
         self.canvas.delete("route_left", "route_shortest", "route_straightest", "route_diagonal", "route_smoothed")
-        if self.mouse_sim_running: return
+        if self.mouse_sim_running or self.sim_paused: return
         visibility_map = { "route_left": self.show_route_left_var, "route_shortest": self.show_route_shortest_var, "route_diagonal": self.show_route_diagonal_var, "route_straightest": self.show_route_straightest_var, "route_smoothed": self.show_route_smoothed_var }
         line_options_sharp = {'width': ROUTE_WIDTH, 'capstyle': tk.BUTT}; line_options_shortest = {'width': ROUTE_WIDTH + 2, 'capstyle': tk.ROUND}; line_options_round = {'width': ROUTE_WIDTH, 'capstyle': tk.ROUND}; line_options_straightest = {'width': ROUTE_WIDTH, 'capstyle': tk.ROUND}; line_options_smoothed = {'width': ROUTE_WIDTH, 'capstyle': tk.ROUND, 'dash': (4, 4)}
         paths_colors_tags_basic = [(self.route_path_shortest, COLOR_ROUTE_SHORTEST, "route_shortest"), (self.route_path_diagonal, COLOR_ROUTE_DIAGONAL, "route_diagonal"), (self.route_path_left, COLOR_ROUTE_LEFT, "route_left")]
@@ -728,7 +795,6 @@ class MazeEditor:
             except Exception as e: print(f"Error smoothing route: {e}"); self.update_status("Error smoothing route.")
 
     # --- Maze Generation ---
-    # ... (This section is unchanged and correct from before) ...
     def _get_neighbours(self, r, c, visited):
         neighbours = []; gs = self.grid_size
         for direction4 in range(4):
@@ -810,7 +876,6 @@ class MazeEditor:
                  if not self._check_save_before_action("changing size for generation"): self.selected_size_var.set(str(self.grid_size)); return
                  if not self._set_grid_size(target_size): return
         except ValueError: pass
-
         self.show_sim_results = False
         gs = self.grid_size
         if not self.goal_cells:
@@ -829,8 +894,6 @@ class MazeEditor:
                 self.update_status(f"Maze generated successfully (Attempt {attempt})."); return
             else: self.update_status(f"Attempt {attempt} failed reachability. Retrying...")
         messagebox.showerror("Generation Error", f"Failed after {max_attempts} attempts.", parent=self.master); self.update_status("Generation failed.");
-
-    # --- Save/Load Text Format ---
     def save_maze_text(self):
         gs = self.grid_size
         filename = filedialog.asksaveasfilename(defaultextension=".txt", filetypes=[("Text files", "*.txt"), ("Maze files", "*.maze"), ("All files", "*.*")], title="Save Maze As Text File", initialfile=f"maze{gs}x{gs}_{time.strftime('%Y%m%d_%H%M%S')}.txt")
@@ -854,16 +917,11 @@ class MazeEditor:
             self.current_maze_file = filename; self.maze_modified = False; self._update_window_title()
             self.update_status(f"Maze saved to {os.path.basename(filename)}"); return True
         except Exception as e: messagebox.showerror("Save Error", f"Failed save:\n{e}", parent=self.master); self.update_status("Save failed."); return False
-
     def load_maze_text(self):
-        """Loads maze wall data from a text file, detecting size."""
         if not self._check_save_before_action("loading"): return
         filename = filedialog.askopenfilename(filetypes=[("Text/Maze files", "*.txt *.maze"), ("All files", "*.*")], title="Load Maze File")
         if not filename: return
-
-        # <<< MODIFIED >>> Reset simulation result display on load
         self.show_sim_results = False
-
         try:
             with open(filename, 'r') as f: lines = [line.rstrip() for line in f if line.strip()]
             detected_size = -1
@@ -877,6 +935,7 @@ class MazeEditor:
             gs = self.grid_size
             new_h=[[False for _ in range(gs)] for _ in range(gs+1)]; new_v=[[False for _ in range(gs+1)] for _ in range(gs)]
             loaded_goal_cells = set()
+            loaded_start_cell = None
             for r_idx, line in enumerate(lines):
                 if r_idx%2==0: # H walls
                     r_wall = r_idx//2
@@ -889,10 +948,14 @@ class MazeEditor:
                             char_idx=c*4; new_v[r_cell][c]=(line[char_idx]=='|') if char_idx<len(line) else False
                             if c < gs: # Cell content
                                 content_idx = c*4 + 1
-                                if content_idx + 2 < len(line) and line[content_idx:content_idx+3] == " G ":
-                                    loaded_goal_cells.add((r_cell, c))
+                                if content_idx + 2 < len(line):
+                                    content = line[content_idx:content_idx+3]
+                                    if content == " G ": loaded_goal_cells.add((r_cell, c))
+                                    elif content == " S ": loaded_start_cell = (r_cell, c)
             self.h_walls=new_h; self.v_walls=new_v; self.initialize_outer_walls()
             self.goal_cells = loaded_goal_cells if loaded_goal_cells else self._default_goal_cells.copy()
+            self.start_cell = loaded_start_cell if loaded_start_cell is not None else (gs - 1, 0)
+            self.start_pos_lh = (self.start_cell[0], self.start_cell[1], N4)
             self.current_maze_file=filename; self.maze_modified=False
             self._update_window_title(); self.find_and_draw_routes()
             self.update_status(f"Loaded {gs}x{gs} maze: {os.path.basename(filename)}")
@@ -1042,7 +1105,6 @@ class MazeEditor:
         except Exception as e: target_canvas.delete("all"); target_canvas.create_text(target_size_px/2, target_size_px/2, text=f"Preview Error:\n{type(e).__name__}", justify=tk.CENTER, fill="red")
 
     def _download_and_load_selected_maze(self, filename, download_url):
-        """Downloads the content, detects size, and loads it."""
         self.update_status(f"Downloading '{filename}'..."); self.master.update()
         self.show_sim_results = False
         try:
@@ -1059,22 +1121,27 @@ class MazeEditor:
             gs = int(self.selected_size_var.get())
             new_h=[[False for _ in range(gs)] for _ in range(gs+1)]; new_v=[[False for _ in range(gs+1)] for _ in range(gs)]
             loaded_goal_cells = set()
+            loaded_start_cell = None
             for r_idx, line in enumerate(lines):
-                if r_idx%2==0: # H walls
+                if r_idx%2==0:
                     r_wall = r_idx//2
                     if 0<=r_wall<=gs:
                         for c in range(gs): char_idx=c*4+2; new_h[r_wall][c]=(line[char_idx]=='-') if char_idx<len(line) else False
-                else: # V walls & Cells
+                else:
                     r_cell=(r_idx-1)//2
                     if 0<=r_cell<gs:
                         for c in range(gs+1):
                             char_idx=c*4; new_v[r_cell][c]=(line[char_idx]=='|') if char_idx<len(line) else False
-                            if c < gs: # Cell content
+                            if c < gs:
                                 content_idx = c*4 + 1
-                                if content_idx + 2 < len(line) and line[content_idx:content_idx+3] == " G ":
-                                    loaded_goal_cells.add((r_cell, c))
+                                if content_idx + 2 < len(line):
+                                    content = line[content_idx:content_idx+3]
+                                    if content == " G ": loaded_goal_cells.add((r_cell, c))
+                                    elif content == " S ": loaded_start_cell = (r_cell, c)
             self.h_walls=new_h; self.v_walls=new_v; self.initialize_outer_walls()
             self.goal_cells = loaded_goal_cells if loaded_goal_cells else self._default_goal_cells.copy()
+            self.start_cell = loaded_start_cell if loaded_start_cell is not None else (gs - 1, 0)
+            self.start_pos_lh = (self.start_cell[0], self.start_cell[1], N4)
             self.current_maze_file = f"GitHub: {filename}"; self.maze_modified=False
             self._update_window_title(); self.find_and_draw_routes()
             self.update_status(f"Loaded {gs}x{gs} maze '{filename}' from GitHub.")
@@ -1083,76 +1150,199 @@ class MazeEditor:
         except ValueError as e: messagebox.showerror("Error", f"Invalid format/size '{filename}':\n{e}", parent=self.master); self.update_status(f"Load failed: {e}"); self.current_maze_file=None; self.maze_modified=False; self._update_window_title()
         except Exception as e: messagebox.showerror("Error", f"Failed process '{filename}':\n{e}", parent=self.master); self.update_status("Load failed."); self.current_maze_file=None; self.maze_modified=False; self._update_window_title()
 
-
     def update_status(self, message):
         self.status_label.config(text=message)
 
     # --- Mouse Simulation Methods ---
-    def start_mouse_simulation(self):
-        """Starts or stops the mouse simulation."""
-        if self.mouse_sim_running:
-            self.mouse_sim_running = False # Stop current simulation
-            if self.mouse_after_id:
-                self.master.after_cancel(self.mouse_after_id)
-                self.mouse_after_id = None
-            self.update_status("Mouse simulation stopped.")
-            # If we stop manually, don't keep the results, just revert to normal view
-            self.show_sim_results = False
-            self.find_and_draw_routes()
+    def _save_sim_state(self):
+        """Saves the current simulation state to the history."""
+        state = {
+            'phase': self.mouse_sim_phase, 'run_count': self.mouse_run_count,
+            'r': self.mouse_r, 'c': self.mouse_c, 'dir4': self.mouse_dir4,
+            'seen_h': [row[:] for row in self.mouse_seen_h_walls],
+            'seen_v': [row[:] for row in self.mouse_seen_v_walls],
+            'trail': self.mouse_trail[:], 'walls_seen_count': self.mouse_walls_seen_count,
+            'status_text': self.status_label.cget("text")
+        }
+        # If we have stepped back, new actions create a new timeline
+        if self.sim_history_index < len(self.sim_history) - 1:
+            self.sim_history = self.sim_history[:self.sim_history_index + 1]
+        self.sim_history.append(state)
+        self.sim_history_index += 1
+
+    def _load_sim_state(self, index):
+        """Loads a simulation state from history and updates the view."""
+        if not (0 <= index < len(self.sim_history)): return
+        self.sim_history_index = index
+        state = self.sim_history[index]
+        self.mouse_sim_phase = state['phase']
+        self.mouse_run_count = state['run_count']
+        self.mouse_r = state['r']; self.mouse_c = state['c']; self.mouse_dir4 = state['dir4']
+        self.mouse_seen_h_walls = state['seen_h']; self.mouse_seen_v_walls = state['seen_v']
+        self.mouse_trail = state['trail']; self.mouse_walls_seen_count = state['walls_seen_count']
+        self.update_status(state['status_text'])
+        self._draw_simulation_state()
+        self._update_sim_button_states()
+
+    def _update_sim_button_states(self):
+        """Updates the enabled/disabled state and text of simulation buttons."""
+        # This check ensures that if we stop the sim, the buttons don't try to update
+        if not (self.mouse_sim_running or self.sim_paused): return
+        
+        self.sim_pause_button.config(text='▶' if self.sim_paused else '⏸')
+        back_state = tk.NORMAL if self.sim_paused and self.sim_history_index > 0 else tk.DISABLED
+        self.sim_back_button.config(state=back_state)
+        
+        # Forward button is enabled if paused and not at the end of history,
+        # OR if paused at the end but the sim can still calculate more steps.
+        is_at_end = self.sim_history_index >= len(self.sim_history) - 1
+        can_run_more = self.mouse_sim_running
+        forward_state = tk.DISABLED
+        if self.sim_paused:
+            if not is_at_end:
+                forward_state = tk.NORMAL # Can step forward through history
+            elif can_run_more:
+                forward_state = tk.NORMAL # Can execute a new step
+        self.sim_forward_button.config(state=forward_state)
+
+    def _toggle_sim_pause(self):
+        """Toggles the paused state of the simulation."""
+        if not (self.mouse_sim_running or self.sim_paused): return
+        # If the sim is already finished (running=False, paused=True), we don't allow unpausing.
+        if not self.mouse_sim_running and self.sim_paused:
             return
 
+        self.sim_paused = not self.sim_paused
+        self._update_sim_button_states()
+        if not self.sim_paused:
+            # We are unpausing, resume the automatic simulation loop
+            self._mouse_simulation_step() 
+
+    def _sim_step_forward(self):
+        """Moves the simulation forward by one step, either from history or by calculating a new step."""
+        if not self.sim_paused: return
+        is_at_end = self.sim_history_index >= len(self.sim_history) - 1
+        
+        if not is_at_end:
+            # We are not at the end, so just load the next historical state.
+            self._load_sim_state(self.sim_history_index + 1)
+        elif self.mouse_sim_running:
+            # We are at the end of history, but the simulation is not yet complete.
+            # Execute one new step manually.
+            self._execute_one_sim_step()
+
+    def _sim_step_backward(self):
+        """Moves the simulation backward by one step from history."""
+        if not self.sim_paused: return
+        if self.sim_history_index > 0:
+            self._load_sim_state(self.sim_history_index - 1)
+
+    def stop_mouse_simulation(self, user_stopped=True):
+        """Stops the current mouse simulation and cleans up the GUI."""
+        was_active = self.mouse_sim_running or self.sim_paused
+        
+        self.mouse_sim_running = False
+        self.sim_paused = False
+        if self.mouse_after_id:
+            self.master.after_cancel(self.mouse_after_id)
+            self.mouse_after_id = None
+        
+        if was_active: 
+            if user_stopped:
+                self.update_status("Mouse simulation stopped by user.")
+            
+            # Restore GUI
+            self.sim_controls_frame.pack_forget()
+            self.simulate_button.pack(side=tk.LEFT, padx=10)
+            
+            self.show_sim_results = False
+            self.find_and_draw_routes()
+
+    def start_mouse_simulation(self):
+        """Starts a new mouse simulation run."""
+        if self.mouse_sim_running or self.sim_paused:
+            self.stop_mouse_simulation(user_stopped=True)
+            return
         if not self.goal_cells:
             messagebox.showwarning("Simulation Error", "No goal cells defined. Shift+Click to set goals.", parent=self.master)
             return
-
+        # --- Setup ---
         self.mouse_sim_running = True
-        self.show_sim_results = False # Reset results display at the start
+        self.sim_paused = False
+        self.show_sim_results = False
+        self.sim_history = []
+        self.sim_history_index = -1
+        # --- Initial State ---
         self.mouse_sim_phase = "EXPLORE"
         self.mouse_run_count = 1
         self.mouse_r, self.mouse_c = self.start_cell
-        self.mouse_dir4 = N4 # Start facing North
+        self.mouse_dir4 = N4
         self.mouse_trail = [(self.mouse_r, self.mouse_c)]
-
         gs = self.grid_size
         self.mouse_seen_h_walls = [[False for _ in range(gs)] for _ in range(gs + 1)]
         self.mouse_seen_v_walls = [[False for _ in range(gs + 1)] for _ in range(gs)]
         for c_idx in range(gs): self.mouse_seen_h_walls[0][c_idx] = self.mouse_seen_h_walls[gs][c_idx] = True
         for r_idx in range(gs): self.mouse_seen_v_walls[r_idx][0] = self.mouse_seen_v_walls[r_idx][gs] = True
-
-        self._update_seen_walls() # Reveal walls of start cell
-
+        self.mouse_walls_seen_count = self._count_seen_walls() # Initialize count
+        self._update_seen_walls()
         self.update_status(f"Run {self.mouse_run_count} ({self.mouse_sim_phase}): Starting exploration...")
+        # --- GUI Update ---
+        self.simulate_button.pack_forget()
+        self.sim_controls_frame.pack(side=tk.LEFT, padx=10)
         self.canvas.delete("route_left", "route_shortest", "route_straightest", "route_diagonal", "route_smoothed")
-        self._mouse_simulation_step() # Start the first step
+        # --- Save Initial State and Start ---
+        self._save_sim_state() # Save state 0
+        self._draw_simulation_state()
+        self._update_sim_button_states()
+        self.mouse_after_id = self.master.after(50, self._mouse_simulation_step)
 
     def _mouse_simulation_step(self):
-        """Executes a single step of the mouse simulation, looping until the best path is found."""
-        if not self.mouse_sim_running: return
+        """The timer-based loop for the simulation. Calls the core logic if not paused."""
+        if not self.mouse_sim_running: 
+            if self.mouse_after_id: self.master.after_cancel(self.mouse_after_id); self.mouse_after_id = None
+            return
+        if self.sim_paused:
+            if self.mouse_after_id: self.master.after_cancel(self.mouse_after_id); self.mouse_after_id = None
+            return
 
+        # Execute the logic for one step
+        self._execute_one_sim_step()
+        
+        # Schedule the next step if the simulation is still running
+        if self.mouse_sim_running:
+            self.mouse_after_id = self.master.after(10, self._mouse_simulation_step)
+
+    def _execute_one_sim_step(self):
+        """
+        Calculates and executes a single step of the simulation logic.
+        This is the core logic, separated to be called manually or by the timer loop.
+        """
         gs = self.grid_size
         r, c, direction = self.mouse_r, self.mouse_c, self.mouse_dir4
-
         self._update_seen_walls()
 
         if self.mouse_sim_phase == "EXPLORE":
             if (r, c) in self.goal_cells:
                 self.update_status(f"Run {self.mouse_run_count} ({self.mouse_sim_phase}): Goal reached! Returning to start...")
                 self.mouse_sim_phase = "RETURN_TO_START"
-                self.mouse_trail = [(r,c)] # Reset trail for the return trip
+                self.mouse_trail = [(r,c)]
             else:
                 flood_map = self._run_flood_fill_on_seen_maze()
                 current_flood_val = flood_map[r][c]
                 if current_flood_val == float('inf'):
-                    self.update_status("Mouse is trapped! Stopping simulation."); self.mouse_sim_running = False; self.draw_maze(); return
-                options = [] # (flood_value, turn_priority, next_r, next_c, next_dir4)
+                    self.update_status("Mouse is trapped! Press Stop to exit.")
+                    self.mouse_sim_running = False; self.sim_paused = True
+                    self._save_sim_state(); self._draw_simulation_state(); self._update_sim_button_states()
+                    return
+                options = []
                 for move_dir in range(4):
                     if not self._mouse_has_wall_in_sim(r, c, move_dir):
                         nr, nc = r + DR4[move_dir], c + DC4[move_dir]
                         if 0 <= nr < gs and 0 <= nc < gs and flood_map[nr][nc] < current_flood_val:
                             turn_diff = abs(direction - move_dir)
-                            if turn_diff == 0: turn_prio = 0 # Straight
-                            elif turn_diff == 2: turn_prio = 2 # Turn around
-                            else: turn_prio = 1 # Left/Right turn
+                            if turn_diff == 0: turn_prio = 0
+                            elif turn_diff == 2: turn_prio = 2
+                            else: turn_prio = 1
                             options.append((flood_map[nr][nc], turn_prio, nr, nc, move_dir))
                 if options:
                     options.sort()
@@ -1160,38 +1350,42 @@ class MazeEditor:
                     self.mouse_r, self.mouse_c, self.mouse_dir4 = next_r, next_c, next_dir
                     self.mouse_trail.append((self.mouse_r, self.mouse_c))
                 else:
-                    self.mouse_sim_running = False; self.update_status("Mouse trapped in unhandled local minimum. Stopping."); self.draw_maze(); return
-
+                    self.update_status("Mouse trapped in local minimum. Press Stop to exit.")
+                    self.mouse_sim_running = False; self.sim_paused = True
+                    self._save_sim_state(); self._draw_simulation_state(); self._update_sim_button_states()
+                    return
         elif self.mouse_sim_phase == "RETURN_TO_START":
-            if (r, c) == self.start_cell: # We have arrived
+            if (r, c) == self.start_cell:
                 self.mouse_run_count += 1
                 self.update_status(f"Run {self.mouse_run_count} (SPEED_RUN): Preparing for speed run...")
                 self.mouse_sim_phase = "SPEED_RUN"
-                self.mouse_trail = [(r,c)] # Reset trail for speed run
-                self.mouse_walls_seen_count = self._count_seen_walls() # Snapshot knowledge
+                self.mouse_trail = [(r,c)]
+                self.mouse_walls_seen_count = self._count_seen_walls()
             else:
                 path_to_start, _ = self._calculate_dijkstra_on_seen_maze((r,c), self.start_cell, 0.0)
                 if not path_to_start or len(path_to_start) < 2:
-                    self.update_status("Error: Lost! Cannot find path back to start! Re-exploring."); self.mouse_sim_phase = "EXPLORE"; return
-                next_r, next_c = path_to_start[1]
-                dr, dc = next_r - r, next_c - c
-                for i in range(4):
-                    if DR4[i] == dr and DC4[i] == dc: self.mouse_dir4 = i; break
-                self.mouse_r, self.mouse_c = next_r, next_c
-                self.mouse_trail.append((self.mouse_r, self.mouse_c))
-
+                    self.update_status("Error: Lost! Re-exploring.")
+                    self.mouse_sim_phase = "EXPLORE"
+                else:
+                    next_r, next_c = path_to_start[1]
+                    dr, dc = next_r - r, next_c - c
+                    for i in range(4):
+                        if DR4[i] == dr and DC4[i] == dc: self.mouse_dir4 = i; break
+                    self.mouse_r, self.mouse_c = next_r, next_c
+                    self.mouse_trail.append((self.mouse_r, self.mouse_c))
         elif self.mouse_sim_phase == "SPEED_RUN":
             if (r, c) in self.goal_cells:
                 new_wall_count = self._count_seen_walls()
                 if new_wall_count == self.mouse_walls_seen_count:
-                    # <<< MODIFIED >>> On successful completion, set flags and redraw.
-                    self.update_status(f"Run {self.mouse_run_count} Complete. Best route found! Path length: {len(self.mouse_trail)-1}")
-                    self.mouse_sim_running = False
-                    self.show_sim_results = True # Keep results visible
-                    self.draw_maze() # Final redraw with results
-                    # Re-draw final path on top
-                    self.canvas.create_line([coord for r_cell, c_cell in self.mouse_trail for coord in self.cell_center_to_pixel(r_cell, c_cell)], fill="cyan", width=ROUTE_WIDTH, tags="mouse_trail")
-                    return # Stop the .after() loop
+                    # SIMULATION IS COMPLETE: Pause for final review
+                    self.update_status(f"Run {self.mouse_run_count} Complete! Best route found. Press Stop to exit.")
+                    self.show_sim_results = True
+                    self.mouse_sim_running = False # No more steps can be calculated
+                    self.sim_paused = True         # Keep UI in interactive review mode
+                    self._save_sim_state()
+                    self._draw_simulation_state()
+                    self._update_sim_button_states() 
+                    return
                 else:
                     self.update_status(f"Run {self.mouse_run_count} (SPEED_RUN): New walls found. Returning to start...")
                     self.mouse_sim_phase = "RETURN_TO_START"
@@ -1199,44 +1393,39 @@ class MazeEditor:
             else:
                 path_to_goal, _ = self._calculate_dijkstra_on_seen_maze((r,c), self.goal_cells, self.turn_weight_var.get())
                 if not path_to_goal or len(path_to_goal) < 2:
-                    self.update_status(f"Run {self.mouse_run_count} (SPEED_RUN): Path blocked! Re-exploring..."); self.mouse_sim_phase = "EXPLORE"; return
-                next_r, next_c = path_to_goal[1]
-                dr, dc = next_r - r, next_c - c
-                for i in range(4):
-                    if DR4[i] == dr and DC4[i] == dc: self.mouse_dir4 = i; break
-                self.mouse_r, self.mouse_c = next_r, next_c
-                self.mouse_trail.append((self.mouse_r, self.mouse_c))
-
+                    self.update_status(f"Run {self.mouse_run_count} (SPEED_RUN): Path blocked! Re-exploring...")
+                    self.mouse_sim_phase = "EXPLORE"
+                else:
+                    next_r, next_c = path_to_goal[1]
+                    dr, dc = next_r - r, next_c - c
+                    for i in range(4):
+                        if DR4[i] == dr and DC4[i] == dc: self.mouse_dir4 = i; break
+                    self.mouse_r, self.mouse_c = next_r, next_c
+                    self.mouse_trail.append((self.mouse_r, self.mouse_c))
+        
+        # Save the new state, draw it, and update the buttons
+        self._save_sim_state()
         self._draw_simulation_state()
-        if self.mouse_sim_running:
-            self.mouse_after_id = self.master.after(10, self._mouse_simulation_step)
+        self._update_sim_button_states()
 
     def _update_seen_walls(self):
-        """Updates the mouse's knowledge of walls in its current cell."""
         r, c = self.mouse_r, self.mouse_c; gs = self.grid_size
         if not (0 <= r < gs and 0 <= c < gs): return
         self.mouse_seen_h_walls[r][c] = self.h_walls[r][c]
         self.mouse_seen_v_walls[r][c+1] = self.v_walls[r][c+1]
         self.mouse_seen_h_walls[r+1][c] = self.h_walls[r+1][c]
         self.mouse_seen_v_walls[r][c] = self.v_walls[r][c]
-
     def _mouse_has_wall_in_sim(self, r, c, direction4):
-        """Checks if the mouse *thinks* a wall exists from its seen_walls map."""
         gs = self.grid_size
         if not (0 <= r < gs and 0 <= c < gs): return True
         try:
             if direction4 == N4: return self.mouse_seen_h_walls[r][c]
             elif direction4 == E4: return self.mouse_seen_v_walls[r][c+1]
             elif direction4 == S4: return self.mouse_seen_h_walls[r+1][c]
-            elif direction4 == W4: return self.mouse_seen_v_walls[r][c]
+            elif direction4 == W4: return self.v_walls[r][c]
         except IndexError: return True
         return True
-
     def _run_flood_fill_on_seen_maze(self):
-        """
-        Runs Flood Fill (BFS) from the goal cells on the mouse's known map.
-        Returns a 2D array of distances from the goal.
-        """
         gs = self.grid_size
         flood_map = np.full((gs, gs), float('inf'))
         q = deque()
@@ -1247,7 +1436,7 @@ class MazeEditor:
         while q:
             r, c = q.popleft()
             current_dist = flood_map[r][c]
-            for dir4 in range(4): # Check neighbors
+            for dir4 in range(4):
                 if not self._mouse_has_wall_in_sim(r, c, dir4):
                     nr, nc = r + DR4[dir4], c + DC4[dir4]
                     if 0 <= nr < gs and 0 <= nc < gs and flood_map[nr][nc] == float('inf'):
@@ -1255,21 +1444,57 @@ class MazeEditor:
                         q.append((nr, nc))
         return flood_map
 
+    def _calculate_dijkstra_for_weights(self, turn_weight):
+        """
+        Runs Dijkstra's from the goal cells on the true maze map to find the
+        minimum cost to reach every cell. This is for visualization.
+        Returns a 2D numpy array of costs.
+        """
+        gs = self.grid_size
+        cost_map = np.full((gs, gs), float('inf'))
+        pq = []
+        visited = {} 
+
+        for r_goal, c_goal in self.goal_cells:
+            if 0 <= r_goal < gs and 0 <= c_goal < gs:
+                cost_map[r_goal][c_goal] = 0
+                for direction in range(4):
+                    heapq.heappush(pq, (0.0, r_goal, c_goal, direction))
+                    visited[(r_goal, c_goal, direction)] = 0
+
+        while pq:
+            cost, r, c, arr_dir = heapq.heappop(pq)
+            if cost > cost_map[r][c]:
+                continue
+            
+            for next_dir4 in range(4):
+                if not self.has_wall(r, c, next_dir4):
+                    next_r, next_c = r + DR4[next_dir4], c + DC4[next_dir4]
+                    if not (0 <= next_r < gs and 0 <= next_c < gs):
+                        continue
+
+                    new_cost = cost + 1.0
+                    if next_dir4 != arr_dir:
+                        new_cost += turn_weight
+                    
+                    cost_map[next_r][next_c] = min(cost_map[next_r][next_c], new_cost)
+                    
+                    if new_cost < visited.get((next_r, next_c, next_dir4), float('inf')):
+                         visited[(next_r, next_c, next_dir4)] = new_cost
+                         heapq.heappush(pq, (new_cost, next_r, next_c, next_dir4))
+
+        return cost_map
+
     def _count_seen_walls(self):
-        """Counts the number of walls the mouse has discovered."""
         h_count = sum(row.count(True) for row in self.mouse_seen_h_walls)
         v_count = sum(row.count(True) for row in self.mouse_seen_v_walls)
         return h_count + v_count
-
     def _calculate_dijkstra_on_seen_maze(self, start_node_tuple, target_nodes, turn_weight):
-        """Calculates Dijkstra path using the mouse's *seen* walls."""
         gs = self.grid_size
         if isinstance(target_nodes, tuple): target_goals = {target_nodes}
         else: target_goals = target_nodes
-
         if start_node_tuple in target_goals:
             return [start_node_tuple], "Already at target"
-
         pq = [(0.0, 0.0, 0, start_node_tuple[0], start_node_tuple[1], N4, [start_node_tuple])]
         visited = {}
         while pq:
@@ -1291,28 +1516,25 @@ class MazeEditor:
         return [], "Unreachable (Seen Maze)"
 
     def _draw_simulation_state(self):
-        """Draws the maze and the current state of the mouse simulation."""
-        self.draw_maze() # Redraw base maze, which will now handle wall colors
+        self.draw_maze()
         if len(self.mouse_trail) >= 2:
             trail_coords = [coord for r_cell, c_cell in self.mouse_trail for coord in self.cell_center_to_pixel(r_cell, c_cell)]
-            # Use different colors for different phases
-            trail_color = "magenta" # Default for return/speed run
-            if self.mouse_sim_phase == "EXPLORE":
-                trail_color = "#800080" # Darker purple for exploration
-            elif self.mouse_sim_phase == "SPEED_RUN":
-                trail_color = "cyan"
+            trail_color = "magenta"
+            if self.mouse_sim_phase == "EXPLORE": trail_color = "#800080"
+            elif self.mouse_sim_phase == "SPEED_RUN": trail_color = "cyan"
             self.canvas.create_line(trail_coords, fill=trail_color, width=ROUTE_WIDTH, tags="mouse_trail")
-
         mr, mc, mdir = self.mouse_r, self.mouse_c, self.mouse_dir4
         mx, my = self.cell_center_to_pixel(mr, mc)
-        cs = self.cell_visual_size_px * 0.3 # Mouse size
+        cs = self.cell_visual_size_px * 0.3
         if mdir == N4: points = [mx, my - cs*0.6, mx - cs*0.5, my + cs*0.3, mx + cs*0.5, my + cs*0.3]
         elif mdir == E4: points = [mx + cs*0.6, my, mx - cs*0.3, my - cs*0.5, mx - cs*0.3, my + cs*0.5]
         elif mdir == S4: points = [mx, my + cs*0.6, mx + cs*0.5, my - cs*0.3, mx - cs*0.5, my - cs*0.3]
         else: # W4
             points = [mx - cs*0.6, my, mx + cs*0.3, my + cs*0.5, mx + cs*0.3, my - cs*0.5]
         self.canvas.create_polygon(points, fill="orange", outline="black", tags="mouse_sim_indicator")
-        self.master.update_idletasks() # Force canvas update
+        
+        if self.master.winfo_exists():
+            self.master.update_idletasks()
 
 # --- Main Execution ---
 if __name__ == "__main__":
