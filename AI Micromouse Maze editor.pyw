@@ -1,3 +1,4 @@
+
 import tkinter as tk
 from tkinter import (Canvas, Frame, Button, Label, Entry, messagebox, filedialog,
                      StringVar, DoubleVar, Listbox, Scrollbar, Toplevel, END, SINGLE)
@@ -39,14 +40,18 @@ THEMES = {
         'start': "lightgreen", 'goal': "lightblue", 'grid_line': "#eee",
         'route_left': "gray", 'route_shortest': "purple", 'route_straightest': "darkorange",
         'route_diagonal': "forest green", 'route_smoothed': "cyan", 'key_swatch_border': "#555",
-        'highlight_open': "yellow", 'text': "black"
+        'highlight_open': "yellow", 'text': "black",
+        # New colors for comparison mode
+        'wall_added': '#28a745', 'wall_removed': '#fd7e14', 'wall_match': '#b0b0b0'
     },
     'dark': {
         'background': "#2E2E2E", 'post': "#CCCCCC", 'wall': "#4A90E2", 'wall_seen': "#FF5555",
         'start': "#004D00", 'goal': "#00008B", 'grid_line': "#444444",
         'route_left': "#999999", 'route_shortest': "#9B59B6", 'route_straightest': "#F39C12",
         'route_diagonal': "#2ECC71", 'route_smoothed': "#1ABC9C", 'key_swatch_border': "#AAAAAA",
-        'highlight_open': "#5C5C00", 'text': "#FFFFFF"
+        'highlight_open': "#5C5C00", 'text': "#FFFFFF",
+        # New colors for comparison mode
+        'wall_added': '#00E676', 'wall_removed': '#FFAB00', 'wall_match': '#555555'
     }
 }
 
@@ -124,6 +129,16 @@ class MazeEditor:
         self.mouse_walls_seen_count = 0
         self.mouse_run_count = 0
 
+        # GUI elements for main and comparison views
+        self.paned_window = None
+        self.canvas = None
+        self.comparison_canvas = None
+
+        # New state variables for comparison
+        self.in_comparison_mode = False
+        self.comparison_h_walls = None
+        self.comparison_v_walls = None
+
         self._setup_gui()
         self._create_color_key()
 
@@ -153,6 +168,8 @@ class MazeEditor:
     def toggle_theme(self):
         self.current_theme_name = 'dark' if self.current_theme_name == 'light' else 'light'
         self.canvas.config(bg=self.theme['background'])
+        if self.comparison_canvas:
+            self.comparison_canvas.config(bg=self.theme['background'])
         self._create_color_key()
         self.find_and_draw_routes()
 
@@ -220,6 +237,7 @@ class MazeEditor:
         else:
             self.goal_cells.add(cell); self.update_status(f"Goal cell added: ({r},{c})"); modified = True
         if modified:
+            self.clear_comparison()
             self.show_sim_results = False
             self.maze_modified = True; self._update_window_title(); self.find_and_draw_routes()
 
@@ -230,6 +248,7 @@ class MazeEditor:
         if (r, c) in self.goal_cells:
             self.update_status("Cannot set start on a goal cell.")
             return
+        self.clear_comparison()
         self.start_cell = (r, c)
         self.start_pos_lh = (r, c, N4)
         self.maze_modified = True
@@ -239,6 +258,7 @@ class MazeEditor:
         self.find_and_draw_routes()
 
     def _set_grid_size(self, new_size, is_initial=False):
+        self.clear_comparison()
         if new_size not in [16, 32]:
             if not is_initial: messagebox.showerror("Error", f"Unsupported grid size: {new_size}. Must be 16 or 32.")
             if self.grid_size not in [16, 32]: self.grid_size = DEFAULT_GRID_SIZE
@@ -285,19 +305,19 @@ class MazeEditor:
         Button(maze_actions_group, text="Generate Maze", command=self.generate_maze).grid(row=0, column=1, padx=(0,5), pady=(5,2), sticky='ew')
         Button(maze_actions_group, text="Save Maze", command=self.save_maze_text).grid(row=1, column=0, padx=5, pady=2, sticky='ew')
         Button(maze_actions_group, text="Load Maze", command=self.load_maze_text).grid(row=1, column=1, padx=(0,5), pady=2, sticky='ew')
-        Button(maze_actions_group, text="Load from GitHub", command=self.fetch_github_maze_list).grid(row=2, column=0, columnspan=2, padx=5, pady=(2,5), sticky='ew')
+        Button(maze_actions_group, text="Compare...", command=self.load_comparison_maze).grid(row=2, column=0, padx=5, pady=(2,5), sticky='ew')
+        self.clear_comparison_button = Button(maze_actions_group, text="Clear Comp.", command=self.clear_comparison)
+        self.clear_comparison_button.grid(row=2, column=1, padx=(0,5), pady=(2,5), sticky='ew')
+        self.clear_comparison_button.grid_remove() # Hide it initially
 
         # --- Group for Simulation ---
         sim_group = Frame(top_control_frame, bd=1, relief=tk.GROOVE)
         sim_group.pack(side=tk.LEFT, padx=(0, 5), pady=2, fill=tk.Y, anchor='n')
 
-        # This container holds either the 'start' or 'stop/pause' controls to allow swapping
         self.sim_container = Frame(sim_group)
         self.sim_container.pack(padx=5, pady=5, fill='both', expand=True)
-        # The start button is packed initially
         self.simulate_button = Button(self.sim_container, text="Simulate Mouse", command=self.start_mouse_simulation)
         self.simulate_button.pack()
-        # The other controls are created but not packed
         self.sim_controls_frame = Frame(self.sim_container)
         self.sim_stop_button = Button(self.sim_controls_frame, text="Stop", command=self.stop_mouse_simulation)
         self.sim_stop_button.pack(side=tk.TOP, fill=tk.X, pady=(0,2))
@@ -316,7 +336,7 @@ class MazeEditor:
 
         weight_sub_frame = Frame(analysis_group)
         weight_sub_frame.pack(padx=5, pady=5, anchor='w')
-        Label(weight_sub_frame, text="Weight:").pack(side=tk.LEFT) # Changed label
+        Label(weight_sub_frame, text="Weight:").pack(side=tk.LEFT)
         vcmd_turn = (self.master.register(self.validate_float_entry), '%P')
         self.turn_weight_entry = Entry(weight_sub_frame, textvariable=self.turn_weight_var, width=5, validate='key', validatecommand=vcmd_turn)
         self.turn_weight_entry.pack(side=tk.LEFT, padx=(2, 0))
@@ -341,14 +361,27 @@ class MazeEditor:
         Button(view_group, text="Theme", command=self.toggle_theme).pack(padx=5, pady=(2, 5), fill=tk.X)
 
 
-        # --- Main Canvas and other GUI elements ---
-        self.canvas = Canvas(self.master, bg=self.theme['background'], highlightthickness=0)
-        self.v_scroll = Scrollbar(self.master, orient=tk.VERTICAL, command=self.canvas.yview)
-        self.h_scroll = Scrollbar(self.master, orient=tk.HORIZONTAL, command=self.canvas.xview)
+        # --- Main View Area with PanedWindow ---
+        self.paned_window = tk.PanedWindow(self.master, orient=tk.HORIZONTAL, sashrelief=tk.RAISED, bg="#aaa")
+        self.paned_window.grid(row=1, column=0, sticky="nsew")
+
+        # Main canvas frame (to hold canvas and scrollbars)
+        main_canvas_frame = Frame(self.paned_window, relief=tk.SUNKEN, bd=1)
+        main_canvas_frame.rowconfigure(0, weight=1)
+        main_canvas_frame.columnconfigure(0, weight=1)
+        self.canvas = Canvas(main_canvas_frame, bg=self.theme['background'], highlightthickness=0)
+        self.v_scroll = Scrollbar(main_canvas_frame, orient=tk.VERTICAL, command=self.canvas.yview)
+        self.h_scroll = Scrollbar(main_canvas_frame, orient=tk.HORIZONTAL, command=self.canvas.xview)
         self.canvas.config(yscrollcommand=self.v_scroll.set, xscrollcommand=self.h_scroll.set)
-        self.canvas.grid(row=1, column=0, sticky="nsew")
-        self.v_scroll.grid(row=1, column=1, sticky="ns")
-        self.h_scroll.grid(row=2, column=0, sticky="ew")
+        self.canvas.grid(row=0, column=0, sticky="nsew")
+        self.v_scroll.grid(row=0, column=1, sticky="ns")
+        self.h_scroll.grid(row=1, column=0, sticky="ew")
+        self.paned_window.add(main_canvas_frame, minsize=200)
+
+        # Comparison canvas (created but not added to paned window yet)
+        self.comparison_canvas = Canvas(self.paned_window, bg=self.theme['background'], highlightthickness=0)
+
+        # --- Bottom GUI elements ---
         self.key_frame = Frame(self.master, bd=1, relief=tk.GROOVE)
         self.key_frame.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(0, 5), padx=10)
         self.status_label = Label(self.master, text="Initializing...", bd=1, relief=tk.SUNKEN, anchor=tk.W)
@@ -406,7 +439,9 @@ class MazeEditor:
         self.last_width = width; self.last_height = height
         if not self.grid_size or not self.zoom_to_fit: return
         try:
-             canvas_width = self.canvas.winfo_width(); canvas_height = self.canvas.winfo_height()
+             # Use the paned window's main child for fitting
+             canvas_width = self.paned_window.winfo_children()[0].winfo_width()
+             canvas_height = self.paned_window.winfo_children()[0].winfo_height()
              if canvas_width <= 1 or canvas_height <= 1:
                   self.master.after(50, lambda: self.handle_resize(self.master.winfo_width(), self.master.winfo_height()))
                   return
@@ -425,6 +460,8 @@ class MazeEditor:
         total_width = self.grid_size * self.cell_visual_size_px + 2 * MARGIN
         total_height = self.grid_size * self.cell_visual_size_px + 2 * MARGIN
         self.canvas.config(scrollregion=(0, 0, total_width, total_height))
+        if self.in_comparison_mode:
+            self.comparison_canvas.config(scrollregion=(0, 0, total_width, total_height))
 
     def initialize_outer_walls(self):
         gs = self.grid_size
@@ -440,6 +477,7 @@ class MazeEditor:
         else: return False
 
     def reset_maze(self, add_start_wall=True, called_from_set_size=False, skip_redraw=False):
+        self.clear_comparison()
         if self.mouse_sim_running or self.sim_paused:
             self.stop_mouse_simulation()
         if not called_from_set_size:
@@ -561,9 +599,11 @@ class MazeEditor:
                 elif wall_type == 'v': self.v_walls[r][c] = not self.v_walls[r][c]; toggled = True
             except IndexError: pass
             if toggled:
-                self.maze_modified = True; self.find_and_draw_routes()
+                self.maze_modified = True
+                self.find_and_draw_routes() # This will update both canvases if in comparison mode
                 self.update_status(f"Wall {'H' if wall_type=='h' else 'V'}({r},{c}) toggled.")
                 self._update_window_title()
+
     def on_close_window(self):
         if self.mouse_sim_running: self.mouse_sim_running = False
         if self._check_save_before_action("closing"): self.master.destroy()
@@ -585,13 +625,13 @@ class MazeEditor:
                 fill_color = self.theme['background']
                 if (r, c) == (start_r, start_c): fill_color = self.theme['start']
                 elif (r, c) in self.goal_cells: fill_color = self.theme['goal']
-                elif highlight_on:
+                elif highlight_on and not self.in_comparison_mode:
                     if not self.has_wall(r, c, N4) and not self.has_wall(r, c, E4) and \
                        not self.has_wall(r, c, S4) and not self.has_wall(r, c, W4):
                         fill_color = self.theme['highlight_open']
                 self.canvas.create_rectangle(x0, y0, x1, y1, fill=fill_color, outline=self.theme['grid_line'], tags="cell")
 
-        if self.show_flood_fill_var.get():
+        if self.show_flood_fill_var.get() and not self.in_comparison_mode:
             turn_weight = self.turn_weight_var.get()
             cost_map = None
             is_sim_active = self.mouse_sim_running or self.sim_paused
@@ -620,28 +660,30 @@ class MazeEditor:
             self.canvas.create_line(arrow_center_x, arrow_base_y, arrow_center_x, arrow_tip_y, arrow=tk.LAST, fill=self.theme['text'], width=arrow_width, tags="start_arrow")
 
         is_sim_active = self.mouse_sim_running or self.sim_paused or self.show_sim_results
+        
+        # HORIZONTAL WALLS
         for r_wall in range(gs + 1):
             for c_wall in range(gs):
-                if r_wall < len(self.h_walls) and c_wall < len(self.h_walls[0]) and self.h_walls[r_wall][c_wall]:
-                    x0, y0 = self.cell_to_pixel(r_wall, c_wall); x1 = x0 + self.cell_visual_size_px; y1 = y0
+                if self.h_walls[r_wall][c_wall]:
+                    x0, y0 = self.cell_to_pixel(r_wall, c_wall)
+                    x1 = x0 + self.cell_visual_size_px
                     wall_color = self.theme['wall']
-                    if is_sim_active:
-                        try:
-                            if self.mouse_seen_h_walls[r_wall][c_wall]: wall_color = self.theme['wall_seen']
-                        except IndexError: pass
-                    self.canvas.create_line(x0, y0, x1, y1, fill=wall_color, width=wall_thickness, tags="wall")
+                    if is_sim_active and self.mouse_seen_h_walls[r_wall][c_wall]:
+                        wall_color = self.theme['wall_seen']
+                    self.canvas.create_line(x0, y0, x1, y0, fill=wall_color, width=wall_thickness, tags="wall")
 
+        # VERTICAL WALLS
         for r_wall in range(gs):
             for c_wall in range(gs + 1):
-                 if r_wall < len(self.v_walls) and c_wall < len(self.v_walls[0]) and self.v_walls[r_wall][c_wall]:
-                    x0, y0 = self.cell_to_pixel(r_wall, c_wall); x1 = x0; y1 = y0 + self.cell_visual_size_px
+                if self.v_walls[r_wall][c_wall]:
+                    x0, y0 = self.cell_to_pixel(r_wall, c_wall)
+                    y1 = y0 + self.cell_visual_size_px
                     wall_color = self.theme['wall']
-                    if is_sim_active:
-                        try:
-                            if self.mouse_seen_v_walls[r_wall][c_wall]: wall_color = self.theme['wall_seen']
-                        except IndexError: pass
-                    self.canvas.create_line(x0, y0, x1, y1, fill=wall_color, width=wall_thickness, tags="wall")
+                    if is_sim_active and self.mouse_seen_v_walls[r_wall][c_wall]:
+                        wall_color = self.theme['wall_seen']
+                    self.canvas.create_line(x0, y0, x0, y1, fill=wall_color, width=wall_thickness, tags="wall")
 
+        # POSTS
         for r_post in range(gs + 1):
             for c_post in range(gs + 1):
                 x_center, y_center = self.post_to_pixel(r_post, c_post)
@@ -651,9 +693,88 @@ class MazeEditor:
                     x_center + half_post, y_center + half_post,
                     fill=self.theme['post'], outline=self.theme['post'], tags="post"
                 )
+    
+    def draw_comparison_maze(self):
+        target_canvas = self.comparison_canvas
+        if not self.in_comparison_mode or not target_canvas:
+            return
+
+        gs = self.grid_size
+        wall_thickness = self.scaled_wall_thickness
+        post_size = self.scaled_post_size
+
+        if self.cell_visual_size_px <= 0 or not gs: return
+        target_canvas.delete("all")
+
+        # Draw basic grid
+        for r in range(gs):
+            for c in range(gs):
+                x0, y0 = self.cell_to_pixel(r, c)
+                x1, y1 = x0 + self.cell_visual_size_px, y0 + self.cell_visual_size_px
+                target_canvas.create_rectangle(x0, y0, x1, y1, fill=self.theme['background'], outline=self.theme['grid_line'], tags="cell")
+
+        # Draw walls with comparison logic
+        for r_wall in range(gs + 1):
+            for c_wall in range(gs):
+                current_has = self.h_walls[r_wall][c_wall]
+                comp_has = self.comparison_h_walls[r_wall][c_wall]
+                if not current_has and not comp_has: continue
+                
+                x0, y0 = self.cell_to_pixel(r_wall, c_wall)
+                x1 = x0 + self.cell_visual_size_px
+                
+                if current_has and comp_has: # MATCH
+                    target_canvas.create_line(x0, y0, x1, y0, fill=self.theme['wall_match'], width=wall_thickness, tags="wall")
+                elif current_has and not comp_has: # ADDED
+                    target_canvas.create_line(x0, y0, x1, y0, fill=self.theme['wall_added'], width=wall_thickness, tags="wall")
+                elif not current_has and comp_has: # REMOVED
+                    target_canvas.create_line(x0, y0, x1, y0, fill=self.theme['wall'], width=wall_thickness, tags="wall")
+                    x_mid, y_mid = (x0 + x1) / 2, y0
+                    x_size = self.cell_visual_size_px * 0.2
+                    target_canvas.create_line(x_mid - x_size, y_mid - x_size, x_mid + x_size, y_mid + x_size, fill=self.theme['wall_removed'], width=2, tags="x_marker")
+                    target_canvas.create_line(x_mid - x_size, y_mid + x_size, x_mid + x_size, y_mid - x_size, fill=self.theme['wall_removed'], width=2, tags="x_marker")
+
+        for r_wall in range(gs):
+            for c_wall in range(gs + 1):
+                current_has = self.v_walls[r_wall][c_wall]
+                comp_has = self.comparison_v_walls[r_wall][c_wall]
+                if not current_has and not comp_has: continue
+                
+                x0, y0 = self.cell_to_pixel(r_wall, c_wall)
+                y1 = y0 + self.cell_visual_size_px
+
+                if current_has and comp_has: # MATCH
+                    target_canvas.create_line(x0, y0, x0, y1, fill=self.theme['wall_match'], width=wall_thickness, tags="wall")
+                elif current_has and not comp_has: # ADDED
+                    target_canvas.create_line(x0, y0, x0, y1, fill=self.theme['wall_added'], width=wall_thickness, tags="wall")
+                elif not current_has and comp_has: # REMOVED
+                    target_canvas.create_line(x0, y0, x0, y1, fill=self.theme['wall'], width=wall_thickness, tags="wall")
+                    x_mid, y_mid = x0, (y0 + y1) / 2
+                    x_size = self.cell_visual_size_px * 0.2
+                    target_canvas.create_line(x_mid - x_size, y_mid - x_size, x_mid + x_size, y_mid + x_size, fill=self.theme['wall_removed'], width=2, tags="x_marker")
+                    target_canvas.create_line(x_mid - x_size, y_mid + x_size, x_mid + x_size, y_mid - x_size, fill=self.theme['wall_removed'], width=2, tags="x_marker")
+
+        # Draw posts
+        for r_post in range(gs + 1):
+            for c_post in range(gs + 1):
+                x_center, y_center = self.post_to_pixel(r_post, c_post)
+                half_post = post_size / 2
+                target_canvas.create_rectangle(
+                    x_center - half_post, y_center - half_post,
+                    x_center + half_post, y_center + half_post,
+                    fill=self.theme['post'], outline=self.theme['post'], tags="post"
+                )
 
     def find_and_draw_routes(self):
         self._update_scrollregion()
+
+        if self.in_comparison_mode:
+            self.draw_maze()
+            self.draw_comparison_maze()
+            # Clear any leftover routes from the main canvas
+            self.canvas.delete("route_left", "route_shortest", "route_straightest", "route_diagonal", "route_smoothed", "mouse_trail", "mouse_sim_indicator")
+            return
+            
         if self.mouse_sim_running or self.sim_paused:
              self._draw_simulation_state()
              return
@@ -793,7 +914,7 @@ class MazeEditor:
 
     def draw_current_routes(self):
         self.canvas.delete("route_left", "route_shortest", "route_straightest", "route_diagonal", "route_smoothed")
-        if self.mouse_sim_running or self.sim_paused: return
+        if self.mouse_sim_running or self.sim_paused or self.in_comparison_mode: return
         visibility_map = { "route_left": self.show_route_left_var, "route_shortest": self.show_route_shortest_var, "route_diagonal": self.show_route_diagonal_var, "route_straightest": self.show_route_straightest_var, "route_smoothed": self.show_route_smoothed_var }
         line_options_sharp = {'width': ROUTE_WIDTH, 'capstyle': tk.BUTT}; line_options_shortest = {'width': ROUTE_WIDTH + 2, 'capstyle': tk.ROUND}; line_options_round = {'width': ROUTE_WIDTH, 'capstyle': tk.ROUND}; line_options_straightest = {'width': ROUTE_WIDTH, 'capstyle': tk.ROUND}; line_options_smoothed = {'width': ROUTE_WIDTH, 'capstyle': tk.ROUND, 'dash': (4, 4)}
         paths_colors_tags_basic = [
@@ -903,6 +1024,7 @@ class MazeEditor:
                     if (0 <= nr < gs and 0 <= nc < gs and (nr, nc) not in visited): visited.add((nr, nc)); q.append((nr, nc))
         return False
     def generate_maze(self):
+        self.clear_comparison()
         if not self._check_save_before_action("generating new maze"): return
         try:
             target_size = int(self.selected_size_var.get())
@@ -931,9 +1053,31 @@ class MazeEditor:
     def save_maze_text(self):
         if self.mouse_sim_running or self.sim_paused:
             self.stop_mouse_simulation()
+        
         gs = self.grid_size
-        filename = filedialog.asksaveasfilename(defaultextension=".txt", filetypes=[("Text files", "*.txt"), ("Maze files", "*.maze"), ("All files", "*.*")], title="Save Maze As Text File", initialfile=f"maze{gs}x{gs}_{time.strftime('%Y%m%d_%H%M%S')}.txt")
+        
+        initial_filename = f"maze{gs}x{gs}_{time.strftime('%Y%m%d_%H%M%S')}.txt"
+        initial_directory = None
+
+        if self.current_maze_file and not self.current_maze_file.startswith("GitHub:"):
+            initial_filename = os.path.basename(self.current_maze_file)
+            initial_directory = os.path.dirname(self.current_maze_file)
+        elif self.current_maze_file and self.current_maze_file.startswith("GitHub:"):
+            initial_filename = self.current_maze_file.split("GitHub: ", 1)[1]
+        
+        dialog_options = {
+            'defaultextension': ".txt",
+            'filetypes': [("Text files", "*.txt"), ("Maze files", "*.maze"), ("All files", "*.*")],
+            'title': "Save Maze As",
+            'initialfile': initial_filename
+        }
+        if initial_directory:
+            dialog_options['initialdir'] = initial_directory
+
+        filename = filedialog.asksaveasfilename(**dialog_options)
+
         if not filename: return False
+        
         output_lines = []
         for out_r in range(2 * gs + 1):
             row_str = ""; r_wall = out_r // 2; r_cell = (out_r - 1) // 2
@@ -954,6 +1098,7 @@ class MazeEditor:
             self.update_status(f"Maze saved to {os.path.basename(filename)}"); return True
         except Exception as e: messagebox.showerror("Save Error", f"Failed save:\n{e}", parent=self.master); self.update_status("Save failed."); return False
     def load_maze_text(self):
+        self.clear_comparison()
         if self.mouse_sim_running or self.sim_paused:
             self.stop_mouse_simulation()
         if not self._check_save_before_action("loading"): return
@@ -1134,6 +1279,7 @@ class MazeEditor:
         except IndexError: target_canvas.delete("all"); target_canvas.create_text(target_size_px/2, target_size_px/2, text="Preview Error:\nIndex Error", justify=tk.CENTER, fill="red")
         except Exception as e: target_canvas.delete("all"); target_canvas.create_text(target_size_px/2, target_size_px/2, text=f"Preview Error:\n{type(e).__name__}", justify=tk.CENTER, fill="red")
     def _download_and_load_selected_maze(self, filename, download_url):
+        self.clear_comparison()
         self.update_status(f"Downloading '{filename}'..."); self.master.update()
         self.show_sim_results = False
         try:
@@ -1252,6 +1398,7 @@ class MazeEditor:
             self.show_sim_results = False
             self.find_and_draw_routes()
     def start_mouse_simulation(self):
+        self.clear_comparison()
         if self.mouse_sim_running or self.sim_paused:
             self.stop_mouse_simulation(user_stopped=True)
             return
@@ -1502,28 +1649,98 @@ class MazeEditor:
         return [], "Unreachable (Seen Maze)"
     def _draw_simulation_state(self):
         self.draw_maze()
-        if len(self.mouse_trail) >= 2:
-            trail_coords = [coord for r_cell, c_cell in self.mouse_trail for coord in self.cell_center_to_pixel(r_cell, c_cell)]
-            trail_color = "magenta"
-            if self.mouse_sim_phase == "EXPLORE": trail_color = "#800080"
-            elif self.mouse_sim_phase == "SPEED_RUN": trail_color = self.theme['route_smoothed']
-            elif self.mouse_sim_phase == "RETURN_TO_START": trail_color = self.theme['route_straightest']
-            self.canvas.create_line(trail_coords, fill=trail_color, width=ROUTE_WIDTH, tags="mouse_trail")
-        mr, mc, mdir = self.mouse_r, self.mouse_c, self.mouse_dir4
-        mx, my = self.cell_center_to_pixel(mr, mc)
-        cs = self.cell_visual_size_px * 0.3
-        if mdir == N4: points = [mx, my - cs*0.6, mx - cs*0.5, my + cs*0.3, mx + cs*0.5, my + cs*0.3]
-        elif mdir == E4: points = [mx + cs*0.6, my, mx - cs*0.3, my - cs*0.5, mx - cs*0.3, my + cs*0.5]
-        elif mdir == S4: points = [mx, my + cs*0.6, mx + cs*0.5, my - cs*0.3, mx - cs*0.5, my - cs*0.3]
-        else: # W4
-            points = [mx - cs*0.6, my, mx + cs*0.3, my + cs*0.5, mx + cs*0.3, my - cs*0.5]
-        self.canvas.create_polygon(points, fill="orange", outline="black", tags="mouse_sim_indicator")
+        if not self.in_comparison_mode and (self.mouse_sim_running or self.sim_paused or self.show_sim_results):
+            if len(self.mouse_trail) >= 2:
+                trail_coords = [coord for r_cell, c_cell in self.mouse_trail for coord in self.cell_center_to_pixel(r_cell, c_cell)]
+                trail_color = "magenta"
+                if self.mouse_sim_phase == "EXPLORE": trail_color = "#800080"
+                elif self.mouse_sim_phase == "SPEED_RUN": trail_color = self.theme['route_smoothed']
+                elif self.mouse_sim_phase == "RETURN_TO_START": trail_color = self.theme['route_straightest']
+                self.canvas.create_line(trail_coords, fill=trail_color, width=ROUTE_WIDTH, tags="mouse_trail")
+            
+            mr, mc, mdir = self.mouse_r, self.mouse_c, self.mouse_dir4
+            mx, my = self.cell_center_to_pixel(mr, mc)
+            cs = self.cell_visual_size_px * 0.3
+            if mdir == N4: points = [mx, my - cs*0.6, mx - cs*0.5, my + cs*0.3, mx + cs*0.5, my + cs*0.3]
+            elif mdir == E4: points = [mx + cs*0.6, my, mx - cs*0.3, my - cs*0.5, mx - cs*0.3, my + cs*0.5]
+            elif mdir == S4: points = [mx, my + cs*0.6, mx + cs*0.5, my - cs*0.3, mx - cs*0.5, my - cs*0.3]
+            else: # W4
+                points = [mx - cs*0.6, my, mx + cs*0.3, my + cs*0.5, mx + cs*0.3, my - cs*0.5]
+            self.canvas.create_polygon(points, fill="orange", outline="black", tags="mouse_sim_indicator")
 
         if self.master.winfo_exists():
             self.master.update_idletasks()
 
+    # --- New Comparison Methods ---
+    def clear_comparison(self, *args):
+        if not self.in_comparison_mode:
+            return
+        self.in_comparison_mode = False
+        self.comparison_h_walls = None
+        self.comparison_v_walls = None
+        self.clear_comparison_button.grid_remove()
+        self.paned_window.forget(self.comparison_canvas)
+        self.update_status("Comparison cleared.")
+        self.find_and_draw_routes()
+
+    def load_comparison_maze(self):
+        if self.mouse_sim_running or self.sim_paused:
+            self.stop_mouse_simulation()
+
+        filename = filedialog.askopenfilename(filetypes=[("Text/Maze files", "*.txt *.maze"), ("All files", "*.*")], title="Load Maze to Compare Against")
+        if not filename: return
+
+        try:
+            with open(filename, 'r') as f: lines = [line.rstrip() for line in f if line.strip()]
+            detected_size = -1
+            if len(lines) == 2*16+1: detected_size=16
+            elif len(lines) == 2*32+1: detected_size=32
+            else: raise ValueError(f"Unsupported row count ({len(lines)}).")
+            
+            if self.grid_size != detected_size:
+                messagebox.showerror("Comparison Error", f"Cannot compare mazes of different sizes.\nCurrent maze is {self.grid_size}x{self.grid_size}, file is {detected_size}x{detected_size}.", parent=self.master)
+                return
+
+            expected_cols = 4*detected_size+1
+            if not lines or len(lines[0])<expected_cols: raise ValueError(f"Invalid column count.")
+
+            gs = self.grid_size
+            new_h=[[False for _ in range(gs)] for _ in range(gs+1)]
+            new_v=[[False for _ in range(gs+1)] for _ in range(gs)]
+
+            for r_idx, line in enumerate(lines):
+                if r_idx%2==0:
+                    r_wall = r_idx//2
+                    if 0<=r_wall<=gs:
+                        for c in range(gs): char_idx=c*4+2; new_h[r_wall][c]=(line[char_idx]=='-') if char_idx<len(line) else False
+                else:
+                    r_cell=(r_idx-1)//2
+                    if 0<=r_cell<gs:
+                        for c in range(gs+1):
+                            char_idx=c*4; new_v[r_cell][c]=(line[char_idx]=='|') if char_idx<len(line) else False
+            
+            self.comparison_h_walls = new_h
+            self.comparison_v_walls = new_v
+            self.in_comparison_mode = True
+            
+            self.paned_window.add(self.comparison_canvas, minsize=200)
+            # Wait for window to update its size before placing sash
+            self.master.update_idletasks()
+            sash_position = self.paned_window.winfo_width() // 2
+            self.paned_window.sash_place(0, sash_position, 0)
+            
+            self.clear_comparison_button.grid()
+            
+            self.find_and_draw_routes()
+            self.update_status(f"Comparing with {os.path.basename(filename)}. Right view shows diffs.")
+
+        except Exception as e:
+            messagebox.showerror("Load Error", f"Failed to load comparison maze:\n{e}", parent=self.master)
+            self.clear_comparison()
+
 if __name__ == "__main__":
     root = tk.Tk()
+    root.title("Micromouse Maze Editor")
     if not SCIPY_AVAILABLE:
         print("\nWARNING: SciPy library not found. Smoothed route disabled.")
         print("Install using: pip install scipy numpy\n")
