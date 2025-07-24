@@ -133,11 +133,18 @@ class MazeEditor:
         self.paned_window = None
         self.canvas = None
         self.comparison_canvas = None
+        self.comparison_info_frame = None
+        self.label_main_total = None
+        self.label_comp_total = None
+        self.label_matched = None
+        self.label_added = None
+        self.label_removed = None
 
         # New state variables for comparison
         self.in_comparison_mode = False
         self.comparison_h_walls = None
         self.comparison_v_walls = None
+        self.comparison_maze_file = None
 
         self._setup_gui()
         self._create_color_key()
@@ -305,16 +312,20 @@ class MazeEditor:
         Button(maze_actions_group, text="Generate Maze", command=self.generate_maze).grid(row=0, column=1, padx=(0,5), pady=(5,2), sticky='ew')
         Button(maze_actions_group, text="Save Maze", command=self.save_maze_text).grid(row=1, column=0, padx=5, pady=2, sticky='ew')
         Button(maze_actions_group, text="Load Maze", command=self.load_maze_text).grid(row=1, column=1, padx=(0,5), pady=2, sticky='ew')
-        Button(maze_actions_group, text="Compare...", command=self.load_comparison_maze).grid(row=2, column=0, padx=5, pady=(2,5), sticky='ew')
-        self.clear_comparison_button = Button(maze_actions_group, text="Clear Comp.", command=self.clear_comparison)
-        self.clear_comparison_button.grid(row=2, column=1, padx=(0,5), pady=(2,5), sticky='ew')
-        self.clear_comparison_button.grid_remove() # Hide it initially
+        Button(maze_actions_group, text="Load from GitHub", command=self.fetch_github_maze_list).grid(row=2, column=0, columnspan=2, padx=5, pady=(2,5), sticky='ew')
+        
+        # --- Group for Analysis (Sim & Compare) ---
+        analysis_tools_group = Frame(top_control_frame, bd=1, relief=tk.GROOVE)
+        analysis_tools_group.pack(side=tk.LEFT, padx=(0, 5), pady=2, fill=tk.Y, anchor='n')
 
-        # --- Group for Simulation ---
-        sim_group = Frame(top_control_frame, bd=1, relief=tk.GROOVE)
-        sim_group.pack(side=tk.LEFT, padx=(0, 5), pady=2, fill=tk.Y, anchor='n')
+        compare_frame = Frame(analysis_tools_group)
+        compare_frame.pack(side=tk.TOP, pady=(5,2), padx=5)
+        Button(compare_frame, text="Compare...", command=self.load_comparison_maze).pack(side=tk.LEFT, padx=(0,2))
+        self.clear_comparison_button = Button(compare_frame, text="Clear", command=self.clear_comparison)
+        self.clear_comparison_button.pack(side=tk.LEFT)
+        self.clear_comparison_button.pack_forget()
 
-        self.sim_container = Frame(sim_group)
+        self.sim_container = Frame(analysis_tools_group)
         self.sim_container.pack(padx=5, pady=5, fill='both', expand=True)
         self.simulate_button = Button(self.sim_container, text="Simulate Mouse", command=self.start_mouse_simulation)
         self.simulate_button.pack()
@@ -329,19 +340,19 @@ class MazeEditor:
         self.sim_pause_button.pack(side=tk.LEFT)
         self.sim_forward_button = Button(nav_frame, text="⏩", command=self._sim_step_forward, width=2)
         self.sim_forward_button.pack(side=tk.LEFT)
+        
+        # --- Group for Path Parameters ---
+        path_params_group = Frame(top_control_frame, bd=1, relief=tk.GROOVE)
+        path_params_group.pack(side=tk.LEFT, padx=(0, 5), pady=2, fill=tk.Y, anchor='n')
 
-        # --- Group for Path Analysis ---
-        analysis_group = Frame(top_control_frame, bd=1, relief=tk.GROOVE)
-        analysis_group.pack(side=tk.LEFT, padx=(0, 5), pady=2, fill=tk.Y, anchor='n')
-
-        weight_sub_frame = Frame(analysis_group)
+        weight_sub_frame = Frame(path_params_group)
         weight_sub_frame.pack(padx=5, pady=5, anchor='w')
         Label(weight_sub_frame, text="Weight:").pack(side=tk.LEFT)
         vcmd_turn = (self.master.register(self.validate_float_entry), '%P')
         self.turn_weight_entry = Entry(weight_sub_frame, textvariable=self.turn_weight_var, width=5, validate='key', validatecommand=vcmd_turn)
         self.turn_weight_entry.pack(side=tk.LEFT, padx=(2, 0))
 
-        checkbox_sub_frame = Frame(analysis_group)
+        checkbox_sub_frame = Frame(path_params_group)
         checkbox_sub_frame.pack(padx=5, pady=(0,5), anchor='w')
         self.highlight_checkbutton = tk.Checkbutton(checkbox_sub_frame, text="Highlight Open", variable=self.highlight_open_cells_var, command=self.find_and_draw_routes)
         self.highlight_checkbutton.pack(side=tk.TOP, anchor='w')
@@ -389,7 +400,11 @@ class MazeEditor:
 
     def _create_color_key(self):
         for widget in self.key_frame.winfo_children(): widget.destroy()
-        self.key_frame.columnconfigure(list(range(5)), weight=1)
+        
+        self.route_key_frame = Frame(self.key_frame)
+        self.route_key_frame.pack(side=tk.LEFT, expand=True, fill=tk.X)
+
+        self.route_key_frame.columnconfigure(list(range(5)), weight=1)
         font_size = 8
         def create_key_entry(parent, col, color_key, var):
             frame = Frame(parent); frame.grid(row=0, column=col, sticky='w', padx=3, pady=0)
@@ -397,11 +412,26 @@ class MazeEditor:
             Label(frame, text="", width=2, relief=tk.RAISED, bd=1, bg=self.theme[color_key]).pack(side=tk.LEFT, padx=(0,2))
             label_widget = Label(frame, text="--", anchor='w', font=("TkDefaultFont", font_size)); label_widget.pack(side=tk.LEFT, fill='x', expand=True)
             return label_widget
-        self.key_label_left = create_key_entry(self.key_frame, 0, 'route_left', self.show_route_left_var)
-        self.key_label_shortest = create_key_entry(self.key_frame, 1, 'route_shortest', self.show_route_shortest_var)
-        self.key_label_straightest = create_key_entry(self.key_frame, 2, 'route_straightest', self.show_route_straightest_var)
-        self.key_label_diagonal = create_key_entry(self.key_frame, 3, 'route_diagonal', self.show_route_diagonal_var)
-        self.key_label_smoothed = create_key_entry(self.key_frame, 4, 'route_smoothed', self.show_route_smoothed_var)
+        self.key_label_left = create_key_entry(self.route_key_frame, 0, 'route_left', self.show_route_left_var)
+        self.key_label_shortest = create_key_entry(self.route_key_frame, 1, 'route_shortest', self.show_route_shortest_var)
+        self.key_label_straightest = create_key_entry(self.route_key_frame, 2, 'route_straightest', self.show_route_straightest_var)
+        self.key_label_diagonal = create_key_entry(self.route_key_frame, 3, 'route_diagonal', self.show_route_diagonal_var)
+        self.key_label_smoothed = create_key_entry(self.route_key_frame, 4, 'route_smoothed', self.show_route_smoothed_var)
+
+        # Setup comparison frame and labels
+        self.comparison_info_frame = Frame(self.key_frame, bd=1, relief=tk.GROOVE)
+        Label(self.comparison_info_frame, text="Comparison Stats", font=("Arial", 8, "bold")).grid(row=0, column=0, columnspan=2, sticky='w', padx=4, pady=(2,0))
+        self.label_main_total = Label(self.comparison_info_frame, text="Current Walls: 0", font=("Arial", 8))
+        self.label_main_total.grid(row=1, column=0, sticky='w', padx=4)
+        self.label_comp_total = Label(self.comparison_info_frame, text="Compared Walls: 0", font=("Arial", 8))
+        self.label_comp_total.grid(row=2, column=0, sticky='w', padx=4)
+        self.label_matched = Label(self.comparison_info_frame, text="Matched: 0", font=("Arial", 8))
+        self.label_matched.grid(row=1, column=1, sticky='w', padx=4)
+        self.label_added = Label(self.comparison_info_frame, text="Added: 0", font=("Arial", 8))
+        self.label_added.grid(row=2, column=1, sticky='w', padx=4)
+        self.label_removed = Label(self.comparison_info_frame, text="Removed: 0", font=("Arial", 8))
+        self.label_removed.grid(row=3, column=1, sticky='w', padx=4, pady=(0,2))
+
 
     def validate_float_entry(self, P):
         if P == "" or P == "." or P == "-": return True
@@ -693,7 +723,13 @@ class MazeEditor:
                     x_center + half_post, y_center + half_post,
                     fill=self.theme['post'], outline=self.theme['post'], tags="post"
                 )
-    
+        
+        if self.in_comparison_mode:
+            label = os.path.basename(self.current_maze_file) if self.current_maze_file else "Current Maze"
+            x = MARGIN + (self.grid_size * self.cell_visual_size_px) / 2
+            y = MARGIN / 2
+            self.canvas.create_text(x, y, text=label, fill=self.theme['text'], anchor='center', font=("Arial", 10, "bold"))
+
     def draw_comparison_maze(self):
         target_canvas = self.comparison_canvas
         if not self.in_comparison_mode or not target_canvas:
@@ -705,6 +741,9 @@ class MazeEditor:
 
         if self.cell_visual_size_px <= 0 or not gs: return
         target_canvas.delete("all")
+
+        # Local counters
+        added, removed, matched = 0, 0, 0
 
         # Draw basic grid
         for r in range(gs):
@@ -720,16 +759,32 @@ class MazeEditor:
                 comp_has = self.comparison_h_walls[r_wall][c_wall]
                 if not current_has and not comp_has: continue
                 
-                x0, y0 = self.cell_to_pixel(r_wall, c_wall)
-                x1 = x0 + self.cell_visual_size_px
+                px0, py0 = self.post_to_pixel(r_wall, c_wall)
+                px1, py1 = self.post_to_pixel(r_wall, c_wall + 1)
                 
                 if current_has and comp_has: # MATCH
-                    target_canvas.create_line(x0, y0, x1, y0, fill=self.theme['wall_match'], width=wall_thickness, tags="wall")
+                    matched += 1
+                    target_canvas.create_line(px0, py0, px1, py1, fill=self.theme['wall_match'], width=wall_thickness, tags="wall")
                 elif current_has and not comp_has: # ADDED
-                    target_canvas.create_line(x0, y0, x1, y0, fill=self.theme['wall_added'], width=wall_thickness, tags="wall")
+                    added += 1
+                    zigzag_points = []
+                    num_points = 9 
+                    amplitude = self.cell_visual_size_px * 0.2
+                    total_dist = px1 - px0
+                    num_full_segments = (num_points - 1) / 2
+                    unit_dist = total_dist / num_full_segments
+
+                    zigzag_points.extend([px0, py0])
+                    for i in range(1, num_points - 1):
+                        px = px0 + (i * 0.5) * unit_dist
+                        py = py0 + amplitude if i % 2 != 0 else py0 - amplitude
+                        zigzag_points.extend([px, py])
+                    zigzag_points.extend([px1, py1])
+                    target_canvas.create_line(zigzag_points, fill=self.theme['wall_added'], width=2, tags="wall")
                 elif not current_has and comp_has: # REMOVED
-                    target_canvas.create_line(x0, y0, x1, y0, fill=self.theme['wall'], width=wall_thickness, tags="wall")
-                    x_mid, y_mid = (x0 + x1) / 2, y0
+                    removed += 1
+                    target_canvas.create_line(px0, py0, px1, py1, fill=self.theme['wall'], width=wall_thickness, tags="wall")
+                    x_mid, y_mid = (px0 + px1) / 2, py0
                     x_size = self.cell_visual_size_px * 0.2
                     target_canvas.create_line(x_mid - x_size, y_mid - x_size, x_mid + x_size, y_mid + x_size, fill=self.theme['wall_removed'], width=2, tags="x_marker")
                     target_canvas.create_line(x_mid - x_size, y_mid + x_size, x_mid + x_size, y_mid - x_size, fill=self.theme['wall_removed'], width=2, tags="x_marker")
@@ -740,16 +795,32 @@ class MazeEditor:
                 comp_has = self.comparison_v_walls[r_wall][c_wall]
                 if not current_has and not comp_has: continue
                 
-                x0, y0 = self.cell_to_pixel(r_wall, c_wall)
-                y1 = y0 + self.cell_visual_size_px
+                px0, py0 = self.post_to_pixel(r_wall, c_wall)
+                px1, py1 = self.post_to_pixel(r_wall + 1, c_wall)
 
                 if current_has and comp_has: # MATCH
-                    target_canvas.create_line(x0, y0, x0, y1, fill=self.theme['wall_match'], width=wall_thickness, tags="wall")
+                    matched += 1
+                    target_canvas.create_line(px0, py0, px1, py1, fill=self.theme['wall_match'], width=wall_thickness, tags="wall")
                 elif current_has and not comp_has: # ADDED
-                    target_canvas.create_line(x0, y0, x0, y1, fill=self.theme['wall_added'], width=wall_thickness, tags="wall")
+                    added += 1
+                    zigzag_points = []
+                    num_points = 9
+                    amplitude = self.cell_visual_size_px * 0.2
+                    total_dist = py1 - py0
+                    num_full_segments = (num_points - 1) / 2
+                    unit_dist = total_dist / num_full_segments
+
+                    zigzag_points.extend([px0, py0])
+                    for i in range(1, num_points - 1):
+                        px = px0 + amplitude if i % 2 != 0 else px0 - amplitude
+                        py = py0 + (i * 0.5) * unit_dist
+                        zigzag_points.extend([px, py])
+                    zigzag_points.extend([px1, py1])
+                    target_canvas.create_line(zigzag_points, fill=self.theme['wall_added'], width=2, tags="wall")
                 elif not current_has and comp_has: # REMOVED
-                    target_canvas.create_line(x0, y0, x0, y1, fill=self.theme['wall'], width=wall_thickness, tags="wall")
-                    x_mid, y_mid = x0, (y0 + y1) / 2
+                    removed += 1
+                    target_canvas.create_line(px0, py0, px1, py1, fill=self.theme['wall'], width=wall_thickness, tags="wall")
+                    x_mid, y_mid = px0, (py0 + py1) / 2
                     x_size = self.cell_visual_size_px * 0.2
                     target_canvas.create_line(x_mid - x_size, y_mid - x_size, x_mid + x_size, y_mid + x_size, fill=self.theme['wall_removed'], width=2, tags="x_marker")
                     target_canvas.create_line(x_mid - x_size, y_mid + x_size, x_mid + x_size, y_mid - x_size, fill=self.theme['wall_removed'], width=2, tags="x_marker")
@@ -764,6 +835,23 @@ class MazeEditor:
                     x_center + half_post, y_center + half_post,
                     fill=self.theme['post'], outline=self.theme['post'], tags="post"
                 )
+        
+        # Add labels and counts
+        if self.in_comparison_mode:
+            # Title
+            label = self.comparison_maze_file if self.comparison_maze_file else "Comparison Maze"
+            x = MARGIN + (self.grid_size * self.cell_visual_size_px) / 2
+            y = MARGIN / 2
+            target_canvas.create_text(x, y, text=label, fill=self.theme['text'], anchor='center', font=("Arial", 10, "bold"))
+            
+            # Update labels in the key_frame
+            main_total = sum(row.count(True) for row in self.h_walls) + sum(row.count(True) for row in self.v_walls)
+            comp_total = sum(row.count(True) for row in self.comparison_h_walls) + sum(row.count(True) for row in self.comparison_v_walls)
+            self.label_main_total.config(text=f"Current Walls: {main_total}")
+            self.label_comp_total.config(text=f"Compared Walls: {comp_total}")
+            self.label_matched.config(text=f"Matched: {matched}")
+            self.label_added.config(text=f"Added: {added}")
+            self.label_removed.config(text=f"Removed: {removed}")
 
     def find_and_draw_routes(self):
         self._update_scrollregion()
@@ -1678,7 +1766,9 @@ class MazeEditor:
         self.in_comparison_mode = False
         self.comparison_h_walls = None
         self.comparison_v_walls = None
-        self.clear_comparison_button.grid_remove()
+        self.comparison_maze_file = None
+        self.clear_comparison_button.pack_forget()
+        self.comparison_info_frame.pack_forget()
         self.paned_window.forget(self.comparison_canvas)
         self.update_status("Comparison cleared.")
         self.find_and_draw_routes()
@@ -1721,6 +1811,7 @@ class MazeEditor:
             
             self.comparison_h_walls = new_h
             self.comparison_v_walls = new_v
+            self.comparison_maze_file = os.path.basename(filename)
             self.in_comparison_mode = True
             
             self.paned_window.add(self.comparison_canvas, minsize=200)
@@ -1729,10 +1820,11 @@ class MazeEditor:
             sash_position = self.paned_window.winfo_width() // 2
             self.paned_window.sash_place(0, sash_position, 0)
             
-            self.clear_comparison_button.grid()
+            self.clear_comparison_button.pack(side=tk.LEFT)
+            self.comparison_info_frame.pack(side=tk.RIGHT, padx=5, fill=tk.Y)
             
             self.find_and_draw_routes()
-            self.update_status(f"Comparing with {os.path.basename(filename)}. Right view shows diffs.")
+            self.update_status(f"Comparing. Right: Gray=Match, Green Zig-Zag=Added, Blue w/ X=Removed.")
 
         except Exception as e:
             messagebox.showerror("Load Error", f"Failed to load comparison maze:\n{e}", parent=self.master)
@@ -1747,3 +1839,4 @@ if __name__ == "__main__":
         messagebox.showwarning("Missing Dependency", "SciPy library not found.\nSmoothed route disabled.\n\nInstall using:\npip install scipy numpy", parent=root)
     app = MazeEditor(root)
     root.mainloop()
+
