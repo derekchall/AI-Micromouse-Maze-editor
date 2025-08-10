@@ -32,8 +32,9 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
 
 # --- Game Constants ---
-PACMAN_GAME_SPEED_MS = 15      # Faster loop for smoother animation
-PACMAN_SPEED_PX = 2.25         # Base speed in pixels per frame
+PACMAN_GAME_SPEED_MS = 15      # Target UI update rate
+PACMAN_BASE_SPEED_CPS = 2.5    # Base speed in Cells Per Second
+GHOST_SPEEDS_CPS = [2.4, 2.3, 2.6, 2.2] # Blinky, Pinky, Inky, Clyde speeds in CPS
 PACMAN_MAX_SPEED_MODIFIER = 1.5 # Additional speed increase (150%) when all pellets are eaten
 
 # --- Configuration Constants ---
@@ -175,6 +176,8 @@ class MazeEditor:
         self.global_anim_counter = 0
         self.pacman_pellets = {}
         self.pacman_power_pellets = {}
+        self.pacman_cherry = None
+        self.pacman_next_cherry_time = 0
         self.pacman_initial_pellet_count = 0
         self.pacman_start_time = 0
         self.ghosts = []
@@ -184,6 +187,7 @@ class MazeEditor:
         self.frightened_timer = 0
         self.ghost_eaten_bonus = 200
         self.ghost_return_map = None # Flood-fill map for eaten ghosts
+        self.pacman_last_loop_time = 0
 
         self._init_sound()
         self._setup_gui()
@@ -206,7 +210,6 @@ class MazeEditor:
                 pygame.mixer.init()
                 pygame.mixer.set_num_channels(16)
                 
-                # **FIX**: Use absolute paths for all sound files inside a "sounds" folder
                 def get_sound(filename):
                     fpath = os.path.join(SCRIPT_DIR, "sounds", filename)
                     return pygame.mixer.Sound(fpath) if os.path.exists(fpath) else NoSound()
@@ -217,6 +220,7 @@ class MazeEditor:
                 self.sound_power_pellet = get_sound("power_pellet.wav")
                 self.sound_eat_ghost = get_sound("eat_ghost.wav")
                 self.sound_ghost_eyes = get_sound("ghost_eyes.wav")
+                self.sound_eat_fruit = get_sound("eat_fruit.wav")
 
                 self.sound_ghosts = []
                 for i in range(1, 6):
@@ -224,6 +228,7 @@ class MazeEditor:
                 
                 self.ghost_channel = pygame.mixer.Channel(1)
                 self.eyes_channel = pygame.mixer.Channel(2)
+                self.fruit_channel = pygame.mixer.Channel(3)
             except Exception as e:
                 print(f"Pygame mixer init failed: {e}")
                 PYGAME_AVAILABLE = False
@@ -231,8 +236,9 @@ class MazeEditor:
         if not PYGAME_AVAILABLE:
             self.sound_start, self.sound_waka, self.sound_death = NoSound(), NoSound(), NoSound()
             self.sound_power_pellet, self.sound_eat_ghost, self.sound_ghost_eyes = NoSound(), NoSound(), NoSound()
+            self.sound_eat_fruit = NoSound()
             self.sound_ghosts = []
-            self.ghost_channel, self.eyes_channel = None, None
+            self.ghost_channel, self.eyes_channel, self.fruit_channel = None, None, None
 
     @property
     def theme(self):
@@ -1876,7 +1882,7 @@ class MazeEditor:
             messagebox.showerror("Load Error", f"Failed to load comparison maze:\n{e}", parent=self.master)
             self.clear_comparison()
 
-    # <--- ENTIRE PAC-MAN SECTION REWRITTEN FROM HERE ---
+    # --- Pac-Man Section ---
     
     def _create_ghost_return_map(self):
         """Generates a flood-fill map leading to the ghost house (goal cells)."""
@@ -1931,7 +1937,7 @@ class MazeEditor:
                     r_check = r_start + r_offset if r_start < gs / 2 else r_start - r_offset
                     c_check = c_start + c_offset if c_start < gs / 2 else c_start - c_offset
                     
-                    if (r_check, c_check) in accessible_cells:
+                    if (r_check, c_check) in accessible_cells and (r_check, c_check) not in self.goal_cells:
                         self.pacman_power_pellets[(r_check, c_check)] = 0
                         placed = True
                         break
@@ -1963,7 +1969,7 @@ class MazeEditor:
             target_sound_index = min(int(percent_eaten * num_sounds), num_sounds - 1)
 
         if self.ghost_channel and self.sound_ghosts and self.pacman_current_ghost_sound_index != target_sound_index:
-            self.ghost_speed_multiplier *= 1.25 
+            self.ghost_speed_multiplier *= 1.05
             for g in self.ghosts:
                 if g['state'] == 'active':
                     g['reversal_pending'] = True
@@ -1991,12 +1997,15 @@ class MazeEditor:
         self.ghost_speed_multiplier = 1.0
         self.pacman_game_over_state = None
         self.frightened_timer = 0
+        self.pacman_cherry = None
+        self.pacman_next_cherry_time = time.time() + random.uniform(10, 15)
         self.pacman_pellets.clear()
         self.ghosts.clear()
 
         accessible_cells = self._find_accessible_pellets()
         for r, c in accessible_cells:
-            self.pacman_pellets[(r, c)] = 0
+            if (r, c) not in self.goal_cells:
+                self.pacman_pellets[(r, c)] = 0
             
         self._place_power_pellets(accessible_cells)
         self.pacman_initial_pellet_count = len(self.pacman_pellets) + len(self.pacman_power_pellets)
@@ -2011,7 +2020,6 @@ class MazeEditor:
         goal_cell_list = list(self.goal_cells) if self.goal_cells else []
         default_starts = [(center-2, center-1), (center-1, center-2), (center-1, center), (center, center-1)]
         ghost_colors = ['#FF0000', '#FFB8FF', '#00FFFF', '#FFB852']
-        ghost_speeds = [2.0, 1.9, 2.1, 1.8]
         
         for i in range(4):
             r, c = goal_cell_list[i] if i < len(goal_cell_list) else default_starts[i]
@@ -2019,7 +2027,7 @@ class MazeEditor:
             self.ghosts.append({
                 'id': i, 'pos': (r, c), 'px': px, 'py': py, 'color': ghost_colors[i],
                 'dir': N4, 'state': 'waiting', 'release_time': i * 3.0,
-                'speed': ghost_speeds[i], 'is_moving': False, 'reversal_pending': False
+                'speed': GHOST_SPEEDS_CPS[i], 'is_moving': False, 'reversal_pending': False
             })
         
         self.pacman_start_time = 0
@@ -2029,8 +2037,7 @@ class MazeEditor:
         self.canvas.focus_set()
         
         self.find_and_draw_routes()
-        self.master.after(4000, self._start_ghost_siren)
-        self.pacman_game_loop_id = self.master.after(4000, self._pacman_game_loop)
+        self.pacman_game_loop_id = self.master.after(4000, self._start_pacman_gameplay)
 
     def stop_pacman_mode(self, force=False):
         if not self.in_pacman_mode: return
@@ -2103,7 +2110,6 @@ class MazeEditor:
                 self.stop_pacman_mode(force=True); self.draw_pacman_game()
             else:
                 self.pacman_is_dying = False
-                self.pacman_current_ghost_sound_index = -1
                 self.pacman_pos = self.start_cell
                 self.pacman_px, self.pacman_py = self.cell_center_to_pixel(*self.pacman_pos)
                 self.pacman_dir = E4; self.pacman_next_dir = E4; self.pacman_is_moving = False
@@ -2118,8 +2124,7 @@ class MazeEditor:
                 
                 self.pacman_start_time = 0
                 self.find_and_draw_routes()
-                self.master.after(4000, self._start_ghost_siren)
-                self.pacman_game_loop_id = self.master.after(4000, self._pacman_game_loop)
+                self.pacman_game_loop_id = self.master.after(4000, self._start_pacman_gameplay)
 
     def _get_ghost_next_direction(self, ghost):
         gr, gc = ghost['pos']
@@ -2175,9 +2180,31 @@ class MazeEditor:
                     if dist_sq < min_dist_sq:
                         min_dist_sq = dist_sq; best_dir = d
             return best_dir if best_dir != -1 else opposite_dir
+
+    def _start_pacman_gameplay(self):
+        """Initializes timers and starts the game loop and siren."""
+        if not self.in_pacman_mode: return
+
+        # Reset the siren to its initial state before playing.
+        self.pacman_current_ghost_sound_index = -1
+        self._start_ghost_siren()
+
+        # Initialize the delta time timer right before the loop starts.
+        self.pacman_last_loop_time = time.time()
+
+        # Start the main game loop.
+        self._pacman_game_loop()
     
     def _pacman_game_loop(self):
         if not self.in_pacman_mode or self.pacman_is_dying: return
+
+        # --- Delta Time Calculation ---
+        current_time = time.time()
+        delta_t = current_time - self.pacman_last_loop_time
+        self.pacman_last_loop_time = current_time
+        # Clamp delta_t to prevent physics explosions on major lag or window dragging
+        if delta_t > 0.1:
+            delta_t = 0.1
         
         if self.pacman_eating_ghost:
             self.find_and_draw_routes()
@@ -2202,6 +2229,12 @@ class MazeEditor:
                 for g in self.ghosts:
                     if g['state'] in ['active', 'frightened']: g['state'] = 'frightened'; g['reversal_pending'] = True
             
+            if self.pacman_cherry and self.pacman_pos == self.pacman_cherry['pos']:
+                self.pacman_score += 100
+                if self.fruit_channel: self.fruit_channel.play(self.sound_eat_fruit)
+                self.pacman_cherry = None
+                self.pacman_next_cherry_time = time.time() + random.uniform(10, 15)
+
             if not self.pacman_pellets and not self.pacman_power_pellets:
                 self.update_status(f"YOU WIN! Score: {self.pacman_score}"); self.pacman_game_over_state = 'win'
                 self.stop_pacman_mode(force=True); self.draw_pacman_game(); return
@@ -2215,11 +2248,13 @@ class MazeEditor:
         if self.pacman_is_moving:
             pellets_eaten = self.pacman_initial_pellet_count - (len(self.pacman_pellets) + len(self.pacman_power_pellets))
             percent_eaten = pellets_eaten / self.pacman_initial_pellet_count if self.pacman_initial_pellet_count > 0 else 0
-            speed_modifier = 1.0 + ((percent_eaten**0.7) * PACMAN_MAX_SPEED_MODIFIER)
-            current_pac_speed = PACMAN_SPEED_PX * speed_modifier
             
-            self.pacman_px += DC4[self.pacman_dir] * current_pac_speed
-            self.pacman_py += DR4[self.pacman_dir] * current_pac_speed
+            speed_modifier = 1.0 + (percent_eaten**0.7 * PACMAN_MAX_SPEED_MODIFIER)
+            effective_speed_cps = PACMAN_BASE_SPEED_CPS * speed_modifier
+            move_distance = effective_speed_cps * self.cell_visual_size_px * delta_t
+            
+            self.pacman_px += DC4[self.pacman_dir] * move_distance
+            self.pacman_py += DR4[self.pacman_dir] * move_distance
             
             next_r, next_c = self.pacman_pos[0] + DR4[self.pacman_dir], self.pacman_pos[1] + DC4[self.pacman_dir]
             center_x, center_y = self.cell_center_to_pixel(next_r, next_c)
@@ -2240,8 +2275,12 @@ class MazeEditor:
             
             if not ghost['is_moving'] and ghost['state'] != 'waiting':
                 gr, gc = ghost['pos']
-                if ghost['reversal_pending']:
-                    ghost['dir'] = (ghost['dir'] + 2) % 4
+                if ghost.get('reversal_pending', False):
+                    opposite_dir = (ghost['dir'] + 2) % 4
+                    if not self.has_wall(gr, gc, opposite_dir):
+                        ghost['dir'] = opposite_dir
+                    else: 
+                        ghost['dir'] = self._get_ghost_next_direction(ghost)
                     ghost['reversal_pending'] = False
                 else:
                     if ghost['state'] == 'eaten' and ghost['pos'] in self.goal_cells:
@@ -2252,27 +2291,27 @@ class MazeEditor:
                     ghost['is_moving'] = True
 
             if ghost['is_moving']:
-                current_ghost_speed = ghost['speed']
-                if ghost['state'] == 'frightened': current_ghost_speed *= 0.8
-                elif ghost['state'] == 'eaten': current_ghost_speed *= 2.0
-                else: current_ghost_speed *= self.ghost_speed_multiplier
+                current_ghost_speed_cps = ghost['speed']
+                if ghost['state'] == 'frightened': current_ghost_speed_cps *= 0.8
+                elif ghost['state'] == 'eaten': current_ghost_speed_cps *= 2.0
+                else: current_ghost_speed_cps *= self.ghost_speed_multiplier
                 
-                ghost['px'] += DC4[ghost['dir']] * current_ghost_speed
-                ghost['py'] += DR4[ghost['dir']] * current_ghost_speed
+                ghost_move_distance = current_ghost_speed_cps * self.cell_visual_size_px * delta_t
+                
+                ghost['px'] += DC4[ghost['dir']] * ghost_move_distance
+                ghost['py'] += DR4[ghost['dir']] * ghost_move_distance
                 
                 next_r, next_c = ghost['pos'][0] + DR4[ghost['dir']], ghost['pos'][1] + DC4[ghost['dir']]
                 g_center_x, g_center_y = self.cell_center_to_pixel(next_r, next_c)
                 
-                if ((ghost['dir'] == E4 and ghost['px'] >= g_center_x) or
-                    (ghost['dir'] == W4 and ghost['px'] <= g_center_x) or
-                    (ghost['dir'] == S4 and ghost['py'] >= g_center_y) or
-                    (ghost['dir'] == N4 and ghost['py'] <= g_center_y)):
+                dist_sq = (ghost['px'] - g_center_x)**2 + (ghost['py'] - g_center_y)**2
+                if dist_sq <= (ghost_move_distance)**2:
                     ghost['is_moving'] = False; ghost['pos'] = (next_r, next_c)
                     ghost['px'], ghost['py'] = g_center_x, g_center_y
 
         # --- POST-MOVEMENT & SOUND LOGIC ---
         if self.frightened_timer > 0:
-            self.frightened_timer -= PACMAN_GAME_SPEED_MS / 1000.0
+            self.frightened_timer -= delta_t
             if self.frightened_timer <= 0:
                 self.ghost_eaten_bonus = 200; self.ghost_channel.stop(); self._start_ghost_siren()
                 for ghost in self.ghosts:
@@ -2302,6 +2341,14 @@ class MazeEditor:
             elif not any_eyes_returning and self.eyes_channel.get_busy():
                 self.eyes_channel.stop()
         
+        # --- CHERRY LOGIC ---
+        if self.pacman_cherry:
+            if time.time() >= self.pacman_cherry['despawn_time']:
+                self.pacman_cherry = None
+                self.pacman_next_cherry_time = time.time() + random.uniform(14, 18)
+        elif time.time() >= self.pacman_next_cherry_time:
+            self.pacman_cherry = {'pos': self.start_cell, 'despawn_time': time.time() + random.uniform(9, 12)}
+
         self.find_and_draw_routes()
         self.pacman_game_loop_id = self.master.after(PACMAN_GAME_SPEED_MS, self._pacman_game_loop)
 
@@ -2311,6 +2358,7 @@ class MazeEditor:
         
         gs = self.grid_size
         wall_thickness = self.scaled_wall_thickness
+        size = self.cell_visual_size_px * 0.35
 
         for r_wall in range(gs + 1):
             for c_wall in range(gs):
@@ -2333,6 +2381,14 @@ class MazeEditor:
             x, y = self.cell_center_to_pixel(r, c)
             self.canvas.create_oval(x - power_pellet_size, y - power_pellet_size, x + power_pellet_size, y + power_pellet_size, fill="orange", outline="", tags="pellet")
 
+        if self.pacman_cherry:
+            r, c = self.pacman_cherry['pos']
+            x, y = self.cell_center_to_pixel(r,c)
+            radius = self.cell_visual_size_px * 0.15
+            self.canvas.create_oval(x - radius, y - radius, x + radius, y + radius, fill='red', outline='darkred', tags='pacman_fruit')
+            self.canvas.create_oval(x, y - radius, x + (radius*2), y + radius, fill='red', outline='darkred', tags='pacman_fruit')
+            self.canvas.create_line(x+radius, y-radius, x+radius, y - size*0.8, fill='green', width=2, tags='pacman_fruit')
+
         if not self.pacman_game_over_state:
             if not self.pacman_is_dying:
                 for ghost in self.ghosts:
@@ -2342,10 +2398,9 @@ class MazeEditor:
             
             if not self.pacman_is_dying and not self.pacman_eating_ghost:
                 x, y = self.pacman_px, self.pacman_py
-                size = self.cell_visual_size_px * 0.35
                 angle_map = {E4: 45, N4: 135, W4: 225, S4: 315}
                 start_angle = angle_map.get(self.pacman_dir, 45)
-                is_open = (self.global_anim_counter // 2) < 2
+                is_open = (self.global_anim_counter % 8) < 4
                 extent = 270 if (is_open and self.pacman_is_moving) else 359.9
                 self.canvas.create_arc(x - size, y - size, x + size, y + size, start=start_angle, extent=extent, fill="yellow", outline="", tags="pacman")
                                
@@ -2356,7 +2411,6 @@ class MazeEditor:
         score_text = f"SCORE: {self.pacman_score}"
         self.canvas.create_text(MARGIN, MARGIN / 2, text=score_text, anchor='w', fill="white", font=("Arial", 12, "bold"))
         for i in range(self.pacman_lives):
-            size = self.cell_visual_size_px * 0.35
             live_x = MARGIN + i * (size * 2.5)
             live_y = self.grid_size * self.cell_visual_size_px + MARGIN * 1.5
             self.canvas.create_arc(live_x - size, live_y - size, live_x + size, live_y + size, start=45, extent=270, fill="yellow", outline="")
@@ -2420,8 +2474,6 @@ class MazeEditor:
 
         canvas.create_oval(eye_x1-pupil_size/2+pupil_dx, eye_y-pupil_size/2+pupil_dy, eye_x1+pupil_size/2+pupil_dx, eye_y+pupil_size/2+pupil_dy, fill='blue', outline='', tags="ghost")
         canvas.create_oval(eye_x2-pupil_size/2+pupil_dx, eye_y-pupil_size/2+pupil_dy, eye_x2+pupil_size/2+pupil_dx, eye_y+pupil_size/2+pupil_dy, fill='blue', outline='', tags="ghost")
-
-    # --- END OF REWRITTEN PAC-MAN SECTION ---
 
 if __name__ == "__main__":
     root = tk.Tk()
