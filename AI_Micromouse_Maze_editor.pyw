@@ -196,7 +196,9 @@ class MazeEditor:
     def zoom_out(self): self._update_zoom(self.zoom_factor / 1.25)
 
     def set_zoom_to_fit(self):
-        if self.zoom_to_fit: return
+        if self.zoom_to_fit:
+             self.handle_resize(self.master.winfo_width(), self.master.winfo_height())
+             return
         self.zoom_to_fit = True
         self.handle_resize(self.master.winfo_width(), self.master.winfo_height())
 
@@ -478,17 +480,14 @@ class MazeEditor:
     def handle_resize(self, width, height):
         self.last_width = width
         self.last_height = height
-        if not self.grid_size:
+        if not self.grid_size or not self.zoom_to_fit:
             return
 
-        if not self.zoom_to_fit:
-            return
-            
         # If in comparison mode, always re-center the sash and refit.
         if self.in_comparison_mode:
             sash_x = self.paned_window.winfo_width() // 2
             self.paned_window.sash_place(0, sash_x, 0)
-            self.master.update_idletasks()
+            self.master.update_idletasks() # Ensure sash is placed before getting pane size
 
         try:
             # Use the first pane's dimensions as the reference for fitting.
@@ -1869,8 +1868,7 @@ class MazeEditor:
             self.canvas.config(yscrollcommand=self._sync_y_scrollbar, xscrollcommand=self._sync_x_scrollbar)
             self.comparison_canvas.config(yscrollcommand=self._sync_y_scrollbar, xscrollcommand=self._sync_x_scrollbar)
 
-            # Force zoom to fit for the new two-pane layout
-            self.set_zoom_to_fit() 
+            self.master.after(10, self.set_zoom_to_fit) 
             self.update_status(f"Comparing. Edit left maze to see live changes.")
 
         except Exception as e:
@@ -1891,7 +1889,7 @@ class MazeEditor:
         try:
             with open(json_filename, 'w') as f:
                 json.dump(maze_data, f)
-            self.update_status(f"Maze data exported to {json_filename}.")
+            self.update_status(f"Maze data exported to {os.path.basename(json_filename)}.")
             return True
         except Exception as e:
             messagebox.showerror("Export Error", f"Could not save maze data to {json_filename}:\n{e}", parent=self.master)
@@ -1910,7 +1908,7 @@ class MazeEditor:
             messagebox.showwarning("Dependency Missing", "Pygame is required for the 3D viewer. Please install it (`pip install pygame`).", parent=self.master)
             return
 
-        data_filename = "maze_3d_data.json"
+        data_filename = os.path.join(SCRIPT_DIR, "maze_3d_data.json")
         if not self._export_maze_for_external_app(data_filename):
             return
 
@@ -1936,7 +1934,7 @@ class MazeEditor:
             messagebox.showinfo("Game Running", "The Pac-Man game is already open.", parent=self.master)
             return
 
-        data_filename = "maze_pacman_data.json"
+        data_filename = os.path.join(SCRIPT_DIR, "maze_pacman_data.json")
         if not self._export_maze_for_external_app(data_filename):
             return
         

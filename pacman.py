@@ -708,7 +708,9 @@ class PacmanGame:
 
 
 if __name__ == "__main__":
-    json_file_path = "maze_pacman_data.json"
+    # Correctly build the path to the JSON file, making it robust for .pyw execution
+    SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+    json_file_path = os.path.join(SCRIPT_DIR, "maze_pacman_data.json")
 
     if not os.path.exists(json_file_path):
         root = tk.Tk()
