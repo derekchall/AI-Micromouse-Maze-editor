@@ -2,3 +2,4 @@ numpy        # Required by SciPy and for numerical operations
 scipy        # Used for route smoothing (scipy.interpolate)
 requests     # Used for fetching maze lists/files from GitHub
 pygame	 # Used for sound in Pacman mode
+ursina	 # Used for 3d stuff
