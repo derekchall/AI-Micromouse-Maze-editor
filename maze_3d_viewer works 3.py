@@ -13,7 +13,6 @@ h_walls_data, v_walls_data, goal_cells_data = [], [], []
 grid_size_data = 16
 minimap, player_marker, minimap_walls = None, None, None
 seen_cells = set()
-free_fly_camera = None
 
 def dot(v1, v2):
     return v1.x*v2.x + v1.y*v2.y + v1.z*v2.z
@@ -134,27 +133,23 @@ def reveal_minimap_cell(x, y):
 
 def update():
     global velocity
-
-    if not free_fly_camera.enabled:
-        original_rotation=player.rotation_y
-        player.rotation_y+=(held_keys['right arrow']-held_keys['left arrow'])*time.dt*turn_speed
-        if check_collision(): player.rotation_y=original_rotation
-        acceleration_direction=(held_keys['up arrow']-held_keys['down arrow'])
-        velocity+=player.forward*acceleration_direction*acceleration*time.dt
-        forward_speed=dot(velocity,player.forward); sideways_speed=dot(velocity,player.right)
-        forward_velocity=player.forward*forward_speed; sideways_velocity=player.right*sideways_speed
-        forward_velocity-=forward_velocity*friction*time.dt; sideways_velocity-=sideways_velocity*(friction*1.5)*time.dt
-        velocity=forward_velocity+sideways_velocity
-        move_amount=velocity*time.dt
-        original_x=player.x; player.x+=move_amount.x
-        if check_collision(): player.x=original_x; velocity.x=0
-        original_z=player.z; player.z+=move_amount.z
-        if check_collision(): player.z=original_z; velocity.z=0
-        if not raycast(player.world_position,(0,-1,0),distance=robot_height*0.51,ignore=[player,]).hit: player.y-=gravity*time.dt
-        camera_rig.position=player.position; camera_rig.rotation_y=player.rotation_y
-
-    if top_down_cam.enabled:
-        top_down_cam.x=player.x; top_down_cam.z=player.z; top_down_cam.y=zoom_level
+    original_rotation=player.rotation_y
+    player.rotation_y+=(held_keys['right arrow']-held_keys['left arrow'])*time.dt*turn_speed
+    if check_collision(): player.rotation_y=original_rotation
+    acceleration_direction=(held_keys['up arrow']-held_keys['down arrow'])
+    velocity+=player.forward*acceleration_direction*acceleration*time.dt
+    forward_speed=dot(velocity,player.forward); sideways_speed=dot(velocity,player.right)
+    forward_velocity=player.forward*forward_speed; sideways_velocity=player.right*sideways_speed
+    forward_velocity-=forward_velocity*friction*time.dt; sideways_velocity-=sideways_velocity*(friction*1.5)*time.dt
+    velocity=forward_velocity+sideways_velocity
+    move_amount=velocity*time.dt
+    original_x=player.x; player.x+=move_amount.x
+    if check_collision(): player.x=original_x; velocity.x=0
+    original_z=player.z; player.z+=move_amount.z
+    if check_collision(): player.z=original_z; velocity.z=0
+    if not raycast(player.world_position,(0,-1,0),distance=robot_height*0.51,ignore=[player,]).hit: player.y-=gravity*time.dt
+    camera_rig.position=player.position; camera_rig.rotation_y=player.rotation_y
+    if top_down_cam.enabled: top_down_cam.x=player.x; top_down_cam.z=player.z; top_down_cam.y=zoom_level
     
     if minimap:
         offset_x=(grid_size_data*1.8)/2; offset_z=(grid_size_data*1.8)/2
@@ -174,36 +169,17 @@ def update_main_camera_view():
     else: camera.position=(0,robot_height,0); player.visible=False
 
 def input(key):
-    global zoom_level,is_chase_cam, free_fly_camera
-    
-    if key == 'f':
-        if not free_fly_camera.enabled:
-            free_fly_camera.world_position = camera.world_position
-            free_fly_camera.world_rotation = camera.world_rotation
-        
-        free_fly_camera.enabled = not free_fly_camera.enabled
-        camera_rig.enabled = not free_fly_camera.enabled
-        player.visible = free_fly_camera.enabled or is_chase_cam
-
-    # --- THIS IS THE FIX ---
-    # Process scroll wheel input for the free-fly camera
-    if free_fly_camera.enabled:
-        if key == 'scroll up':
-            free_fly_camera.y += 1
-        if key == 'scroll down':
-            free_fly_camera.y -= 1
-
-    if not free_fly_camera.enabled:
-        if key=='m' and minimap: minimap.enabled=not minimap.enabled
-        if key=='tab':
-            camera.enabled=not camera.enabled; top_down_cam.enabled=not top_down_cam.enabled
-            player.visible=top_down_cam.enabled or is_chase_cam
-        if key=='v' and camera.enabled:
-            is_chase_cam=not is_chase_cam; update_main_camera_view()
-        if top_down_cam.enabled:
-            if key=='scroll up': zoom_level-=2
-            if key=='scroll down': zoom_level+=2
-            zoom_level=clamp(zoom_level,5,50)
+    global zoom_level,is_chase_cam
+    if key=='m' and minimap: minimap.enabled=not minimap.enabled
+    if key=='tab':
+        camera.enabled=not camera.enabled; top_down_cam.enabled=not top_down_cam.enabled
+        player.visible=top_down_cam.enabled or is_chase_cam
+    if key=='v' and camera.enabled:
+        is_chase_cam=not is_chase_cam; update_main_camera_view()
+    if top_down_cam.enabled:
+        if key=='scroll up': zoom_level-=2
+        if key=='scroll down': zoom_level+=2
+        zoom_level=clamp(zoom_level,5,50)
 
 if __name__ == '__main__':
     app=Ursina()
@@ -229,8 +205,6 @@ if __name__ == '__main__':
     camera.parent=camera_rig; camera.position=(0,robot_height,0)
     zoom_level=grid_size_data*1.8
     top_down_cam=EditorCamera(rotation=(90,0,0),position=(0,zoom_level,0),enabled=False)
-    
-    free_fly_camera = EditorCamera(enabled=False, rotation_speed=100)
 
     map_size=0.4
     minimap=Entity(parent=camera.ui,scale=map_size,position=(window.aspect_ratio*0.5-map_size*0.5-0.01,0.5-map_size*0.5-0.01),enabled=False)
@@ -246,8 +220,11 @@ if __name__ == '__main__':
     
     player_marker=Entity(parent=minimap, z=0)
     Entity(parent=player_marker, model='circle', color=color.blue, scale=(1/grid_size_data) * 0.6)
+    
+    # --- THIS IS THE FIX ---
+    # The y-scale (length) is reduced from 0.8 to 0.4
     Entity(parent=player_marker, model='quad', color=color.white, scale=((1/grid_size_data)*0.1, (1/grid_size_data)*0.4), origin=(0, -0.5))
 
-    window.title='Micromouse 3D Maze Viewer (M: Minimap, F: Free-Cam)'; window.borderless=False
+    window.title='Micromouse 3D Maze Viewer (M: Toggle Minimap)'; window.borderless=False
     window.fullscreen=False; window.exit_button.visible=False; window.fps_counter.enabled=True
     app.run()
