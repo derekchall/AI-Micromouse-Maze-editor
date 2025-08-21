@@ -11,7 +11,7 @@ JSON_FILE_PATH = os.path.join(script_dir, 'maze_3d_data.json')
 # Globals for minimap state
 h_walls_data, v_walls_data, goal_cells_data = [], [], []
 grid_size_data = 16
-minimap, player_marker, minimap_walls = None, None, None
+minimap, map_pivot, map_content, minimap_walls = None, None, None, None
 seen_cells = set()
 free_fly_camera = None
 
@@ -117,7 +117,8 @@ def grid_to_minimap_pos(x, y):
 def reveal_minimap_cell(x, y):
     cell_ui_size = 1 / grid_size_data
     wall_thickness = cell_ui_size * 0.15
-    wall_color = color.red
+    # --- THIS IS THE FIX ---
+    wall_color = color.rgba(255, 0, 0, 100) # More transparent red
 
     if y>=0 and y<len(h_walls_data) and x<len(h_walls_data[y]) and h_walls_data[y][x]:
         pos=grid_to_minimap_pos(x+0.5,y)
@@ -156,12 +157,13 @@ def update():
     if top_down_cam.enabled:
         top_down_cam.x=player.x; top_down_cam.z=player.z; top_down_cam.y=zoom_level
     
-    if minimap:
+    if map_pivot:
         offset_x=(grid_size_data*1.8)/2; offset_z=(grid_size_data*1.8)/2
         grid_x=(player.x+offset_x)/1.8
         grid_y=grid_size_data-((player.z+offset_z)/1.8)
-        player_marker.position=grid_to_minimap_pos(grid_x,grid_y)
-        player_marker.rotation_z = player.rotation_y
+        
+        map_pivot.rotation_z = -player.rotation_y
+        map_content.position = -grid_to_minimap_pos(grid_x, grid_y)
         
         cell_x,cell_y=int(grid_x),int(grid_y)
         if 0<=cell_x<grid_size_data and 0<=cell_y<grid_size_data:
@@ -185,8 +187,6 @@ def input(key):
         camera_rig.enabled = not free_fly_camera.enabled
         player.visible = free_fly_camera.enabled or is_chase_cam
 
-    # --- THIS IS THE FIX ---
-    # Process scroll wheel input for the free-fly camera
     if free_fly_camera.enabled:
         if key == 'scroll up':
             free_fly_camera.y += 1
@@ -235,18 +235,22 @@ if __name__ == '__main__':
     map_size=0.4
     minimap=Entity(parent=camera.ui,scale=map_size,position=(window.aspect_ratio*0.5-map_size*0.5-0.01,0.5-map_size*0.5-0.01),enabled=False)
     
-    minimap_background=Entity(parent=minimap,model='quad',color=color.black10,scale=1.05,z=3)
+    # --- THIS IS THE FIX ---
+    # The pivot contains the rotating content, but there is no background.
+    map_pivot = Entity(parent=minimap)
+    map_content = Entity(parent=map_pivot)
     
     goal_color = color.black33
     for cell in goal_cells_data:
         pos=grid_to_minimap_pos(cell[1]+0.5,cell[0]+0.5)
-        Entity(parent=minimap,model='quad',color=goal_color,position=pos,scale=1/grid_size_data,z=2)
+        Entity(parent=map_content,model='quad',color=goal_color,position=pos,scale=1/grid_size_data,z=2)
         
-    minimap_walls = Entity(parent=minimap, z=1)
+    minimap_walls = Entity(parent=map_content, z=1)
     
-    player_marker=Entity(parent=minimap, z=0)
-    Entity(parent=player_marker, model='circle', color=color.blue, scale=(1/grid_size_data) * 0.6)
-    Entity(parent=player_marker, model='quad', color=color.white, scale=((1/grid_size_data)*0.1, (1/grid_size_data)*0.4), origin=(0, -0.5))
+    # The player marker is a direct child of the main minimap frame, so it does not move or rotate.
+    player_marker_ui = Entity(parent=minimap, z=0)
+    Entity(parent=player_marker_ui, model='circle', color=color.blue, scale=(1/grid_size_data) * 0.6)
+    Entity(parent=player_marker_ui, model='quad', color=color.white, scale=((1/grid_size_data)*0.1, (1/grid_size_data)*0.4), origin=(0, -0.5))
 
     window.title='Micromouse 3D Maze Viewer (M: Minimap, F: Free-Cam)'; window.borderless=False
     window.fullscreen=False; window.exit_button.visible=False; window.fps_counter.enabled=True
