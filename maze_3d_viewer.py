@@ -18,6 +18,7 @@ grid_size_data = 16
 minimap, map_pivot, map_content, minimap_walls = None, None, None, None
 seen_cells = set()
 free_fly_camera = None
+floor_ref = None # Will hold reference to the floor collider
 
 # Globals for solver state
 is_solving = False
@@ -29,13 +30,23 @@ initial_target_pos = None
 turn_direction = 0
 is_decelerating = False
 
+# Globals for manual control
+velocity = Vec3(0,0,0)
+turn_speed = 125
+acceleration = 20
+friction = 2.0
+gravity = 1
+is_chase_cam = False
+robot_height = 0.25
+zoom_level = 0 # Will be initialized later
+
 # Physics parameters for solver
 solve_velocity = 0.0
 solve_rotation_velocity = 0.0
 solve_acceleration = 20.0
-solve_rotation_acceleration = 450.0
-max_solve_speed = 45.0
-max_solve_rotation_speed = 400.0
+solve_rotation_acceleration = 650.0
+max_solve_speed = 200.0
+max_solve_rotation_speed = 600.0
 
 CELL_SIZE = 1.8
 
@@ -140,33 +151,88 @@ def flood_fill_solve(target_cells):
 
 def generate_solve_actions(target_cells):
     global solve_actions
-    distances=flood_fill_solve(target_cells)
-    offset_x=(grid_size_data*CELL_SIZE)/2;offset_z=(grid_size_data*CELL_SIZE)/2
-    current_x_grid=int((player.x+offset_x)/CELL_SIZE);current_y_grid=grid_size_data-1-int((player.z+offset_z)/CELL_SIZE)
-    if distances[current_y_grid][current_x_grid]==-1: print("Solver: No path to target.");solve_actions=[];return
-    
-    current_dir=0;path=[];x,y=current_x_grid,current_y_grid
-    while distances[y][x]>0:
-        current_dist=distances[y][x]
-        if y>0 and not h_walls_data[y][x] and distances[y-1][x]==current_dist-1: y-=1
-        elif y<grid_size_data-1 and not h_walls_data[y+1][x] and distances[y+1][x]==current_dist-1: y+=1
-        elif x>0 and not v_walls_data[y][x] and distances[y][x-1]==current_dist-1: x-=1
-        elif x<grid_size_data-1 and not v_walls_data[y][x+1] and distances[y][x+1]==current_dist-1: x+=1
-        else: print("Solver Warning: Stuck during path generation.");break
-        path.append((x,y))
-        
-    simple_actions = []
-    if not path: solve_actions = []; return
+    distances = flood_fill_solve(target_cells)
+    offset_x = (grid_size_data * CELL_SIZE) / 2
+    offset_z = (grid_size_data * CELL_SIZE) / 2
+    current_x_grid = int((player.x + offset_x) / CELL_SIZE)
+    current_y_grid = grid_size_data - 1 - int((player.z + offset_z) / CELL_SIZE)
 
+    if distances[current_y_grid][current_x_grid] == -1:
+        print("Solver: No path to target.")
+        solve_actions = []
+        return
+
+    # Determine the robot's current orientation to prefer straight lines from the start
+    angle = round(player.rotation_y / 90) * 90 % 360
+    if 315 <= angle or angle < 45: path_direction = 0  # N
+    elif 45 <= angle < 135: path_direction = 1  # E
+    elif 135 <= angle < 225: path_direction = 2  # S
+    else: path_direction = 3  # W
+
+    path = []
+    x, y = current_x_grid, current_y_grid
+
+    # --- MODIFIED PATH GENERATION LOOP ---
+    while distances[y][x] > 0:
+        current_dist = distances[y][x]
+        
+        # Find all valid neighbors with a shorter path to the goal
+        neighbors = []
+        # North (dir=0)
+        if y > 0 and not h_walls_data[y][x] and distances[y-1][x] == current_dist - 1:
+            neighbors.append({'x': x, 'y': y - 1, 'dir': 0})
+        # East (dir=1)
+        if x < grid_size_data - 1 and not v_walls_data[y][x+1] and distances[y][x+1] == current_dist - 1:
+            neighbors.append({'x': x + 1, 'y': y, 'dir': 1})
+        # South (dir=2)
+        if y < grid_size_data - 1 and not h_walls_data[y+1][x] and distances[y+1][x] == current_dist - 1:
+            neighbors.append({'x': x, 'y': y + 1, 'dir': 2})
+        # West (dir=3)
+        if x > 0 and not v_walls_data[y][x] and distances[y][x-1] == current_dist - 1:
+            neighbors.append({'x': x - 1, 'y': y, 'dir': 3})
+
+        if not neighbors:
+            print("Solver Warning: Stuck during path generation.")
+            break
+
+        # Tie-breaking logic: prefer the neighbor that continues in the current direction
+        best_neighbor = None
+        if len(neighbors) > 1:
+            for n in neighbors:
+                if n['dir'] == path_direction:
+                    best_neighbor = n
+                    break
+        
+        # If no straight path is available, or only one path, just take the first option
+        if best_neighbor is None:
+            best_neighbor = neighbors[0]
+
+        x, y = best_neighbor['x'], best_neighbor['y']
+        path_direction = best_neighbor['dir'] # Update the direction for the next step
+        path.append((x, y))
+
+    # --- Action generation (remains the same) ---
+    simple_actions = []
+    if not path:
+        solve_actions = []
+        return
+    
+    # Get the robot's actual initial direction for generating turn commands
+    angle = round(player.rotation_y / 90) * 90 % 360
+    if 315 <= angle or angle < 45: current_dir = 0  # N
+    elif 45 <= angle < 135: current_dir = 1  # E
+    elif 135 <= angle < 225: current_dir = 2  # S
+    else: current_dir = 3  # W
+
+    last_pos = (current_x_grid, current_y_grid)
     for i in range(len(path)):
-        last_pos = (current_x_grid, current_y_grid) if i == 0 else path[i-1]
         current_pos = path[i]
         dx, dy = current_pos[0] - last_pos[0], current_pos[1] - last_pos[1]
 
-        if dy == -1: required_dir = 0 # N
-        elif dx == 1: required_dir = 1 # E
-        elif dy == 1: required_dir = 2 # S
-        elif dx == -1: required_dir = 3 # W
+        if dy == -1: required_dir = 0  # N
+        elif dx == 1: required_dir = 1  # E
+        elif dy == 1: required_dir = 2  # S
+        elif dx == -1: required_dir = 3  # W
         else: continue
 
         turn = (required_dir - current_dir + 4) % 4
@@ -174,7 +240,9 @@ def generate_solve_actions(target_cells):
         elif turn == 2: simple_actions.extend(['right', 'right'])
         elif turn == 3: simple_actions.append('left')
         
-        simple_actions.append('forward'); current_dir = required_dir
+        simple_actions.append('forward')
+        current_dir = required_dir
+        last_pos = current_pos
 
     processed_actions = []
     i = 0
@@ -192,6 +260,9 @@ def generate_solve_actions(target_cells):
     solve_actions = processed_actions
     print(f"Solver: Generated Route -> {solve_actions}")
 
+# =================================================================
+# ===== THIS IS THE CORRECTED UPDATE FUNCTION FROM THE VERY BEGINNING =====
+# =================================================================
 def update():
     global velocity,is_solving,action_in_progress,solve_actions,target_position,target_rotation
     global solve_velocity,solve_rotation_velocity,turn_direction,is_decelerating,initial_target_pos
@@ -201,62 +272,47 @@ def update():
             action=solve_actions.pop(0); action_in_progress=True; is_decelerating=False
             if isinstance(action,str):
                 if action=='align_rotation':
-                    target_rotation = initial_target_pos[1] # Use the pre-calculated target rotation
+                    target_rotation = initial_target_pos[1]
                     delta = (target_rotation - player.rotation_y + 180) % 360 - 180
                     turn_direction = 1 if delta > 0 else -1
-                elif action=='align_position':
+                elif action=='align_position': 
                     target_position=initial_target_pos[0]
-                else: # This is a regular turn
+                else:
                     target_rotation = player.rotation_y - 90 if action == 'left' else player.rotation_y + 90
                     turn_direction = -1 if action == 'left' else 1
-            elif isinstance(action,tuple): # This is a forward move
+            elif isinstance(action,tuple):
                 move_dist = action[1]
                 target_position = player.position + player.forward * CELL_SIZE * move_dist
 
         if action_in_progress:
             if target_position:
-                dist_to_target = distance(player.position, target_position)
-                braking_dist=(solve_velocity**2)/(2*solve_acceleration) if solve_acceleration > 0 else 0
-                if dist_to_target <= braking_dist and not is_decelerating: is_decelerating = True
-
-                if is_decelerating: solve_velocity -= solve_acceleration * time.dt
-                else: solve_velocity += solve_acceleration * time.dt
-                solve_velocity = clamp(solve_velocity, 0, max_solve_speed)
-                player.position += player.forward * solve_velocity * time.dt
-
                 # --- MODIFICATION START ---
-                # This condition is now more robust. It triggers if the robot overshoots
-                # OR if it has come to a stop during the deceleration phase.
                 if dot(target_position - player.position, player.forward) < 0 or (is_decelerating and solve_velocity <= 0.01):
-                    player.position=target_position
-                    solve_velocity=0
-                    target_position=None
-                    action_in_progress=False
+                    player.position=target_position; solve_velocity=0; target_position=None; action_in_progress=False
                 # --- MODIFICATION END ---
-
+                else:
+                    braking_dist=(solve_velocity**2)/(2*solve_acceleration) if solve_acceleration > 0 else 0
+                    if distance(player.position, target_position) <= braking_dist and not is_decelerating: is_decelerating = True
+                    if is_decelerating: solve_velocity -= solve_acceleration * time.dt
+                    else: solve_velocity += solve_acceleration * time.dt
+                    solve_velocity = clamp(solve_velocity, 0, max_solve_speed)
+                    player.position += player.forward * solve_velocity * time.dt
             elif target_rotation is not None:
-                remaining_angle = abs(target_rotation - player.rotation_y)
-                braking_angle = (solve_rotation_velocity**2)/(2*solve_rotation_acceleration) if solve_rotation_acceleration > 0 else 0
-                if remaining_angle <= braking_angle and not is_decelerating: is_decelerating = True
-
-                if is_decelerating: solve_rotation_velocity -= solve_rotation_acceleration * time.dt
-                else: solve_rotation_velocity += solve_rotation_acceleration * time.dt
-                solve_rotation_velocity = clamp(solve_rotation_velocity, 0, max_solve_rotation_speed)
-                player.rotation_y += solve_rotation_velocity * turn_direction * time.dt
-
                 # --- MODIFICATION START ---
-                # Similar robust condition for rotation. It triggers on overshoot
-                # OR if rotational velocity is effectively zero during deceleration.
                 if (turn_direction * (target_rotation - player.rotation_y)) < 0.1 or (is_decelerating and solve_rotation_velocity <= 0.1):
-                    player.rotation_y = target_rotation % 360
-                    solve_rotation_velocity=0
-                    target_rotation=None
-                    action_in_progress=False
+                    player.rotation_y = target_rotation % 360; solve_rotation_velocity=0; target_rotation=None; action_in_progress=False
                 # --- MODIFICATION END ---
+                else:
+                    braking_angle = (solve_rotation_velocity**2)/(2*solve_rotation_acceleration) if solve_rotation_acceleration > 0 else 0
+                    if abs(target_rotation - player.rotation_y) <= braking_angle and not is_decelerating: is_decelerating = True
+                    if is_decelerating: solve_rotation_velocity -= solve_rotation_acceleration * time.dt
+                    else: solve_rotation_velocity += solve_rotation_acceleration * time.dt
+                    solve_rotation_velocity = clamp(solve_rotation_velocity, 0, max_solve_rotation_speed)
+                    player.rotation_y += solve_rotation_velocity * turn_direction * time.dt
 
         if not solve_actions and not action_in_progress:
             is_solving=False; print("Solver: Run complete.")
-
+    
     if not is_solving and not free_fly_camera.enabled:
         original_rotation=player.rotation_y; player.rotation_y+=(held_keys['right arrow']-held_keys['left arrow'])*time.dt*turn_speed
         if check_collision(): player.rotation_y=original_rotation
@@ -271,12 +327,13 @@ def update():
         original_z=player.z; player.z+=move_amount.z
         if check_collision(): player.z=original_z; velocity.z=0
         if not raycast(player.world_position,(0,-1,0),distance=robot_height*0.51,ignore=[player,]).hit: player.y-=gravity*time.dt
-
+    
     camera_rig.position=player.position; camera_rig.rotation_y=player.rotation_y
-    if top_down_cam.enabled: top_down_cam.x=player.x; top_down_cam.z=player.z; top_down_cam.y=zoom_level
+    if 'top_down_cam' in globals() and top_down_cam and top_down_cam.enabled:
+        top_down_cam.x=player.x; top_down_cam.z=player.z; top_down_cam.y=zoom_level
     if map_pivot:
-        offset_x=(grid_size_data*1.8)/2; offset_z=(grid_size_data*1.8)/2
-        grid_x=(player.x+offset_x)/1.8; grid_y=grid_size_data-((player.z+offset_z)/1.8)
+        offset_x=(grid_size_data*CELL_SIZE)/2; offset_z=(grid_size_data*CELL_SIZE)/2
+        grid_x=(player.x+offset_x)/CELL_SIZE; grid_y=grid_size_data-((player.z+offset_z)/CELL_SIZE)
         map_pivot.rotation_z=-player.rotation_y; map_content.position=-grid_to_minimap_pos(grid_x,grid_y)
         cell_x,cell_y=int(grid_x),int(grid_y)
         if 0<=cell_x<grid_size_data and 0<=cell_y<grid_size_data:
@@ -288,7 +345,7 @@ def update_main_camera_view():
 
 def input(key):
     global zoom_level,is_chase_cam,free_fly_camera,is_solving,velocity,solve_actions,action_in_progress
-    global solve_velocity,solve_rotation_velocity,target_position,target_rotation,initial_target_pos
+    global solve_velocity,solve_rotation_velocity,target_position,target_rotation,initial_target_pos, top_down_cam
     if key=='f':
         if not free_fly_camera.enabled: free_fly_camera.world_position=camera.world_position; free_fly_camera.world_rotation=camera.world_rotation
         free_fly_camera.enabled=not free_fly_camera.enabled; camera_rig.enabled=not free_fly_camera.enabled
@@ -299,27 +356,16 @@ def input(key):
             offset_x=(grid_size_data*CELL_SIZE)/2; offset_z=(grid_size_data*CELL_SIZE)/2
             grid_x=int((player.x+offset_x)/CELL_SIZE); grid_y=grid_size_data-1-int((player.z+offset_z)/CELL_SIZE)
             center_pos = Vec3((grid_x+0.5)*CELL_SIZE-offset_x, player.y, (grid_size_data-(grid_y+0.5))*CELL_SIZE-offset_z)
-            
             is_at_goal = (grid_y, grid_x) in goal_cells_set
             if is_at_goal:
                 print("Solver: At goal! Solving back to start..."); generate_solve_actions(target_cells=[start_cell_data])
             else:
                 print("Solver: Solving to goal..."); generate_solve_actions(target_cells=goal_cells_data)
-            
-            # Determine required start rotation before executing the plan
-            required_start_rot = 0
-            if solve_actions:
-                if solve_actions[0] == 'right': required_start_rot = 0
-                elif solve_actions[0] == 'left': required_start_rot = 0
-                elif isinstance(solve_actions[0], tuple): required_start_rot = 0
-            
-            initial_target_pos = (center_pos, required_start_rot) # Store as a tuple
-            
+            required_start_rot = round(player.rotation_y / 90) * 90
+            initial_target_pos = (center_pos, required_start_rot)
             alignment_actions = []
-            # Calculate shortest turn to required start rotation
             delta_rot = (required_start_rot - player.rotation_y + 180) % 360 - 180
             if abs(delta_rot) > 1: alignment_actions.append('align_rotation')
-
             if distance(player.position, center_pos) > 0.05: alignment_actions.append('align_position')
             solve_actions = alignment_actions + solve_actions
             is_solving = True
@@ -336,7 +382,7 @@ def input(key):
             camera.enabled=not camera.enabled; top_down_cam.enabled=not top_down_cam.enabled
             player.visible=top_down_cam.enabled or is_chase_cam
         if key=='v' and camera.enabled: is_chase_cam=not is_chase_cam; update_main_camera_view()
-        if top_down_cam.enabled:
+        if 'top_down_cam' in globals() and top_down_cam and top_down_cam.enabled:
             if key=='scroll up': zoom_level-=2
             if key=='scroll down': zoom_level+=2; zoom_level=clamp(zoom_level,5,50)
 
@@ -350,25 +396,32 @@ if __name__ == '__main__':
     }
     player_start_position,floor_ref = create_maze_from_json(JSON_FILE_PATH,textures)
     if not floor_ref: print("Exiting due to maze loading failure."); sys.exit()
-    turn_speed=125;acceleration=20;friction=2.0;velocity=Vec3(0,0,0)
-    gravity=1;is_chase_cam=False;whiskers=None;robot_height=0.25
+    
     player=Entity(position=player_start_position,rotation=(0,0,0),model='cube',scale=(0.8,robot_height,1.0),texture=textures.get('robot_body'),color=color.white if textures.get('robot_body') else color.dark_gray,visible=False)
+    
     camera_rig=Entity(position=player.position,rotation_y=player.rotation_y)
-    camera.parent=camera_rig;camera.position=(0,robot_height,0)
+    camera.parent=camera_rig
+    update_main_camera_view()
+
     zoom_level=grid_size_data*1.8
     top_down_cam=EditorCamera(rotation=(90,0,0),position=(0,zoom_level,0),enabled=False)
     free_fly_camera=EditorCamera(enabled=False,rotation_speed=100)
+    
     map_size=0.4
     minimap=Entity(parent=camera.ui,scale=map_size,position=(window.aspect_ratio*0.5-map_size*0.5-0.01,0.5-map_size*0.5-0.01),enabled=False)
     map_pivot=Entity(parent=minimap);map_content=Entity(parent=map_pivot)
+    
     goal_color=color.black33
     for cell in goal_cells_data:
         pos=grid_to_minimap_pos(cell[1]+0.5,cell[0]+0.5)
         Entity(parent=map_content,model='quad',color=goal_color,position=pos,scale=1/grid_size_data,z=2)
+    
     minimap_walls=Entity(parent=map_content,z=1)
     player_marker_ui=Entity(parent=minimap,z=0)
     Entity(parent=player_marker_ui,model='circle',color=color.blue,scale=(1/grid_size_data)*0.6)
     Entity(parent=player_marker_ui,model='quad',color=color.white,scale=((1/grid_size_data)*0.1,(1/grid_size_data)*0.4),origin=(0,-0.5))
+    
     window.title='Micromouse 3D Maze Viewer (S: Solve/Stop, M: Minimap, F: Free-Cam)';window.borderless=False
     window.fullscreen=False;window.exit_button.visible=False;window.fps_counter.enabled=True
+    
     app.run()
