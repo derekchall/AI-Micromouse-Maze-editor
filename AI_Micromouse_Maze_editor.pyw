@@ -1192,7 +1192,7 @@ class MazeEditor:
                     if c < gs: row_str += (" S " if (r_cell,c)==self.start_cell else (" G " if (r_cell,c) in self.goal_cells else "   "))
             output_lines.append(row_str)
         try:
-            with open(filename, 'w') as f: f.write("\n".join(output_lines))
+            with open(filename, 'w') as f: f.write("\n".join(output_lines) + "\n")
             self.current_maze_file = filename; self.maze_modified = False; self._update_window_title()
             self.update_status(f"Maze saved to {os.path.basename(filename)}"); return True
         except Exception as e: messagebox.showerror("Save Error", f"Failed save:\n{e}", parent=self.master); self.update_status("Save failed."); return False
