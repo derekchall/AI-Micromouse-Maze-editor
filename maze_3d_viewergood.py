@@ -204,7 +204,7 @@ def update():
                     target_rotation = initial_target_pos[1] # Use the pre-calculated target rotation
                     delta = (target_rotation - player.rotation_y + 180) % 360 - 180
                     turn_direction = 1 if delta > 0 else -1
-                elif action=='align_position': 
+                elif action=='align_position':
                     target_position=initial_target_pos[0]
                 else: # This is a regular turn
                     target_rotation = player.rotation_y - 90 if action == 'left' else player.rotation_y + 90
@@ -218,14 +218,21 @@ def update():
                 dist_to_target = distance(player.position, target_position)
                 braking_dist=(solve_velocity**2)/(2*solve_acceleration) if solve_acceleration > 0 else 0
                 if dist_to_target <= braking_dist and not is_decelerating: is_decelerating = True
-                
+
                 if is_decelerating: solve_velocity -= solve_acceleration * time.dt
                 else: solve_velocity += solve_acceleration * time.dt
                 solve_velocity = clamp(solve_velocity, 0, max_solve_speed)
                 player.position += player.forward * solve_velocity * time.dt
-                
-                if dot(target_position - player.position, player.forward) < 0 or (dist_to_target < 0.05 and solve_velocity < 0.5):
-                    player.position=target_position; solve_velocity=0; target_position=None; action_in_progress=False
+
+                # --- MODIFICATION START ---
+                # This condition is now more robust. It triggers if the robot overshoots
+                # OR if it has come to a stop during the deceleration phase.
+                if dot(target_position - player.position, player.forward) < 0 or (is_decelerating and solve_velocity <= 0.01):
+                    player.position=target_position
+                    solve_velocity=0
+                    target_position=None
+                    action_in_progress=False
+                # --- MODIFICATION END ---
 
             elif target_rotation is not None:
                 remaining_angle = abs(target_rotation - player.rotation_y)
@@ -235,15 +242,21 @@ def update():
                 if is_decelerating: solve_rotation_velocity -= solve_rotation_acceleration * time.dt
                 else: solve_rotation_velocity += solve_rotation_acceleration * time.dt
                 solve_rotation_velocity = clamp(solve_rotation_velocity, 0, max_solve_rotation_speed)
-                
                 player.rotation_y += solve_rotation_velocity * turn_direction * time.dt
-                
-                if (turn_direction * (target_rotation - player.rotation_y)) < 0.1 or (remaining_angle < 0.5 and solve_rotation_velocity < 1.0):
-                    player.rotation_y = target_rotation % 360; solve_rotation_velocity=0; target_rotation=None; action_in_progress=False
+
+                # --- MODIFICATION START ---
+                # Similar robust condition for rotation. It triggers on overshoot
+                # OR if rotational velocity is effectively zero during deceleration.
+                if (turn_direction * (target_rotation - player.rotation_y)) < 0.1 or (is_decelerating and solve_rotation_velocity <= 0.1):
+                    player.rotation_y = target_rotation % 360
+                    solve_rotation_velocity=0
+                    target_rotation=None
+                    action_in_progress=False
+                # --- MODIFICATION END ---
 
         if not solve_actions and not action_in_progress:
             is_solving=False; print("Solver: Run complete.")
-    
+
     if not is_solving and not free_fly_camera.enabled:
         original_rotation=player.rotation_y; player.rotation_y+=(held_keys['right arrow']-held_keys['left arrow'])*time.dt*turn_speed
         if check_collision(): player.rotation_y=original_rotation
@@ -258,7 +271,7 @@ def update():
         original_z=player.z; player.z+=move_amount.z
         if check_collision(): player.z=original_z; velocity.z=0
         if not raycast(player.world_position,(0,-1,0),distance=robot_height*0.51,ignore=[player,]).hit: player.y-=gravity*time.dt
-    
+
     camera_rig.position=player.position; camera_rig.rotation_y=player.rotation_y
     if top_down_cam.enabled: top_down_cam.x=player.x; top_down_cam.z=player.z; top_down_cam.y=zoom_level
     if map_pivot:
